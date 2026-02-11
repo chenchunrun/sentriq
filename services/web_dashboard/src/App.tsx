@@ -16,6 +16,8 @@ import { Settings } from '@/pages/Settings'
 import { Automation } from '@/pages/Automation'
 import { Notifications } from '@/pages/Notifications'
 import { Workflows } from '@/pages/Workflows'
+// System monitoring
+import { SystemNotifications } from '@/components/SystemNotifications'
 
 // Protected Route Wrapper
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -57,7 +59,11 @@ const PublicRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
 function App() {
   return (
-    <Routes>
+    <>
+      {/* Global System Notifications - shows on all pages */}
+      <SystemNotifications position="bottom-right" />
+
+      <Routes>
       {/* Public Routes */}
       <Route
         path="/login"
@@ -90,6 +96,7 @@ function App() {
       {/* Catch all - redirect to dashboard */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   )
 }
 

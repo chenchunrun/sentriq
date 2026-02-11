@@ -404,3 +404,16 @@ export interface Notification {
   created_at: string;
   action_url?: string;
 }
+
+// =============================================================================
+// Log Types
+// =============================================================================
+
+export type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL'
+
+export interface LogEntry {
+  timestamp: string;
+  level: LogLevel;
+  message: string;
+  extra?: Record<string, unknown> | null;
+}
