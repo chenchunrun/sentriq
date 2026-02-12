@@ -30,8 +30,8 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from routes import alerts as alerts_router
-from routes import analytics as analytics_router
+from routes.alerts import router as alerts_router
+from routes.analytics import router as analytics_router
 
 import sys
 sys.path.insert(0, '/Users/newmba/security')
@@ -171,6 +171,11 @@ app.include_router(
     analytics_router,
     prefix="/api/v1/analytics",
     tags=["Analytics"],
+)
+app.include_router(
+    auth_router,
+    prefix="/api/v1/auth",
+    tags=["Authentication"],
 )
 
 
