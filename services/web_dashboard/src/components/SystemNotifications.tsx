@@ -91,11 +91,12 @@ export const SystemNotifications: React.FC<SystemNotificationsProps> = ({
   useEffect(() => {
     const healthCheck = async (): Promise<void> => {
       try {
-        const response = await fetch('/api/v1/health')
+        const response = await fetch('/health')
         const data = await response.json()
 
         const wasHealthy = isHealthy
-        const currentlyHealthy = data.success === true
+        // Health endpoint returns {status: "healthy"|"degraded"}
+        const currentlyHealthy = data.status === 'healthy'
 
         setIsHealthy(currentlyHealthy)
 
@@ -103,13 +104,13 @@ export const SystemNotifications: React.FC<SystemNotificationsProps> = ({
           addLog({
             level: 'ERROR',
             message: '系统健康检查失败',
-            extra: { endpoint: '/api/v1/health' },
+            extra: { endpoint: '/health' },
           })
         } else if (!wasHealthy && currentlyHealthy) {
           addLog({
             level: 'INFO',
             message: '系统已恢复健康',
-            extra: { endpoint: '/api/v1/health' },
+            extra: { endpoint: '/health' },
           })
         }
       } catch (error) {

@@ -68,15 +68,26 @@ class DatabaseManager:
         """
         self.database_url = database_url
 
-        # Create async engine
+        # Create async engine with SQLite-compatible options
+        # SQLite doesn't support connection pooling, so skip pool params for SQLite
+        is_sqlite = database_url.startswith('sqlite')
+        engine_kwargs = {
+            'pool_pre_ping': True,  # Verify connections before using
+            'echo': echo,
+        }
+
+        if not is_sqlite:
+            # Only add pool parameters for non-SQLite databases
+            engine_kwargs.update({
+                'pool_size': pool_size,
+                'max_overflow': max_overflow,
+                'pool_timeout': pool_timeout,
+                'pool_recycle': pool_recycle,
+            })
+
         self.engine: AsyncEngine = create_async_engine(
             database_url,
-            pool_size=pool_size,
-            max_overflow=max_overflow,
-            pool_timeout=pool_timeout,
-            pool_recycle=pool_recycle,
-            pool_pre_ping=True,  # Verify connections before using
-            echo=echo,
+            **engine_kwargs,
         )
 
         # Create session factory
@@ -159,14 +170,23 @@ class DatabaseManager:
             async with self.engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
 
-            # Get pool status
+            # Get pool status - check if pool has size attribute
             pool = self.engine.pool
+            pool_info = {}
+
+            # Only add pool metrics if the pool type supports them
+            if hasattr(pool, 'size'):
+                pool_info["pool_size"] = pool.size()
+            if hasattr(pool, 'checkedout'):
+                pool_info["checked_out_connections"] = pool.checkedout()
+            if hasattr(pool, 'overflow'):
+                pool_info["overflow"] = pool.overflow()
+            if hasattr(pool, 'checkedin'):
+                pool_info["checked_in_connections"] = pool.checkedin()
+
             return {
                 "status": "healthy",
-                "pool_size": pool.size(),
-                "checked_out_connections": pool.checkedout(),
-                "overflow": pool.overflow(),
-                "checked_in_connections": pool.checkedin(),
+                **pool_info,
             }
         except Exception as e:
             logger.error(f"Database health check failed: {e}")
@@ -199,8 +219,8 @@ async def init_database(
 
     Args:
         database_url: Database connection URL
-        pool_size: Connection pool size
-        max_overflow: Max overflow connections
+        pool_size: Connection pool size (ignored for SQLite)
+        max_overflow: Max overflow connections (ignored for SQLite)
         echo: Echo SQL queries
 
     Returns:
@@ -212,6 +232,7 @@ async def init_database(
         logger.warning("Database already initialized")
         return db_manager
 
+    # Create database manager - it will handle SQLite pool parameters internally
     db_manager = DatabaseManager(
         database_url=database_url,
         pool_size=pool_size,
