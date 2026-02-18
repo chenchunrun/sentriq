@@ -17,12 +17,10 @@ import type {
   Report,
   ReportRequest,
   SystemConfig,
-  TriageResult,
   TopAlerts,
   UserPreferences,
   Notification,
   Workflow,
-  ThreatIntelligence,
   ThreatIntelSource,
 } from '@/types'
 
@@ -554,6 +552,60 @@ export interface AIAnalysisResult {
   raw_content?: string
 }
 
+export interface AttackChainResult {
+  attack_stages: string[]
+  ttps: string[]
+  techniques: Array<{
+    id: string
+    name: string
+    tactic: string
+    description: string
+    detection_methods: string[]
+    mitigations: string[]
+  }>
+  kill_chain_phase: string
+  confidence: number
+  attack_patterns: Array<{
+    pattern: string
+    confidence: number
+    evidence: string[]
+    affected_assets: string[]
+  }>
+  related_campaigns: Array<{
+    name: string
+    confidence: number
+    description: string
+    matched_techniques: string[]
+  }>
+  mitigations: Array<{
+    name: string
+    count: number
+    related_techniques: string[]
+  }>
+  timeline: Array<{
+    type: string
+    timestamp: string
+    event: string
+  }>
+}
+
+export interface TriageResult {
+  alert_id: string
+  triaged_at: string
+  risk_level: string
+  confidence: number
+  reasoning: string
+  recommended_actions: Array<{
+    action: string
+    priority: string
+    type: string
+  }>
+  requires_human_review: boolean
+  processing_time_seconds?: number
+  model_used?: string
+  method?: string
+}
+
 export const aiApi = {
   /**
    * Analyze a single alert using AI
@@ -578,21 +630,30 @@ export const aiApi = {
     })
     return response.data.data
   },
-}
 
-// =============================================================================
-// Export all APIs
-// =============================================================================
+  /**
+   * Triage alert using LangChain agent with tool calling
+   */
+  triageAlert: async (
+    alert: Record<string, unknown>,
+    enrichment?: Record<string, unknown>,
+    useAgent: boolean = true
+  ): Promise<TriageResult> => {
+    const response = await apiClient.post<ApiResponse<TriageResult>>('/ai/triage/agent', alert, {
+      params: { use_agent: useAgent, enrichment: enrichment ? JSON.stringify(enrichment) : undefined },
+    })
+    return response.data.data
+  },
 
-export const api = {
-  auth: authApi,
-  alerts: alertApi,
-  analytics: analyticsApi,
-  reports: reportApi,
-  config: configApi,
-  workflows: workflowApi,
-  notifications: notificationApi,
-  ai: aiApi,
+  /**
+   * Analyze attack chain from multiple alerts
+   */
+  analyzeAttackChain: async (alerts: Record<string, unknown>[]): Promise<AttackChainResult> => {
+    const response = await apiClient.post<ApiResponse<AttackChainResult>>('/ai/analyze-chain', {
+      alerts,
+    })
+    return response.data.data
+  },
 }
 
 // =============================================================================

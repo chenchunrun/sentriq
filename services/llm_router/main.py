@@ -16,11 +16,12 @@
 
 import asyncio
 import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -106,6 +107,142 @@ PROVIDER_ENDPOINTS = {
 }
 
 
+# =============================================================================
+# Complexity Analysis Functions
+# =============================================================================
+
+
+def extract_iocs(messages: List[Dict[str, str]]) -> Dict[str, List[str]]:
+    """
+    Extract Indicators of Compromise (IOCs) from messages.
+
+    Returns dict with categorized IOCs: ips, hashes, urls, domains, cves
+    """
+    iocs = {
+        "ips": [],
+        "hashes": [],
+        "urls": [],
+        "domains": [],
+        "cves": [],
+    }
+
+    # Combine all message content
+    content = " ".join(msg.get("content", "") for msg in messages)
+
+    # IP addresses (IPv4)
+    ip_pattern = r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
+    iocs["ips"] = list(set(re.findall(ip_pattern, content)))
+
+    # File hashes (MD5, SHA1, SHA256)
+    hash_patterns = [
+        r'\b[a-fA-F0-9]{32}\b',  # MD5
+        r'\b[a-fA-F0-9]{40}\b',  # SHA1
+        r'\b[a-fA-F0-9]{64}\b',  # SHA256
+    ]
+    for pattern in hash_patterns:
+        iocs["hashes"].extend(re.findall(pattern, content))
+    iocs["hashes"] = list(set(iocs["hashes"]))
+
+    # URLs
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    iocs["urls"] = list(set(re.findall(url_pattern, content)))
+
+    # CVE IDs
+    cve_pattern = r'CVE-\d{4}-\d{4,7}'
+    iocs["cves"] = list(set(re.findall(cve_pattern, content, re.IGNORECASE)))
+
+    # Domains (simplified - excludes common false positives)
+    domain_pattern = r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b'
+    potential_domains = re.findall(domain_pattern, content)
+    # Filter out numeric-only TLDs and common non-threat patterns
+    iocs["domains"] = [d for d in set(potential_domains) if not d.endswith(('.html', '.jpg', '.png', '.css', '.js'))]
+
+    return iocs
+
+
+def extract_threat_scores(messages: List[Dict[str, str]]) -> List[int]:
+    """Extract threat scores mentioned in messages."""
+    content = " ".join(msg.get("content", "") for msg in messages)
+
+    # Look for threat_score, risk_score, confidence patterns
+    patterns = [
+        r'"threat_score["\']?\s*[:=]\s*(\d+)',
+        r'"risk_score["\']?\s*[:=]\s*(\d+)',
+        r'threat[_-]?level["\']?\s*[:=]\s*"?(\d+)"?',
+        r'score["\']?\s*[:=]\s*(\d+)',
+    ]
+
+    scores = []
+    for pattern in patterns:
+        matches = re.findall(pattern, content, re.IGNORECASE)
+        scores.extend(int(m) for m in matches)
+
+    return scores
+
+
+def analyze_complexity(request: LLMRequest) -> Tuple[str, Dict[str, bool]]:
+    """
+    Analyze request complexity based on multiple factors.
+
+    Returns:
+        Tuple of (complexity_level, factors)
+        complexity_level: "high", "medium", or "low"
+        factors: Dict of factor name -> boolean indicating if present
+    """
+    factors = {}
+
+    # Extract IOCs from messages
+    iocs = extract_iocs(request.messages)
+
+    # Factor 1: Multiple IOCs present
+    total_iocs = sum(len(v) for v in iocs.values())
+    factors["multi_ioc"] = total_iocs > 1
+
+    # Factor 2: High threat scores mentioned
+    threat_scores = extract_threat_scores(request.messages)
+    factors["high_threat_score"] = any(score > 70 for score in threat_scores)
+
+    # Factor 3: Critical severity keywords
+    content = " ".join(msg.get("content", "") for msg in request.messages).lower()
+    critical_keywords = ["critical", "severe", "malware", "ransomware", "apt", "data_exfiltration", "zero-day"]
+    factors["critical_severity"] = any(kw in content for kw in critical_keywords)
+
+    # Factor 4: CVE references present
+    factors["has_cve"] = len(iocs["cves"]) > 0
+
+    # Factor 5: Multiple source IPs (potential multi-stage attack)
+    factors["multi_source"] = len(iocs["ips"]) > 2
+
+    # Factor 6: Asset criticality keywords
+    asset_keywords = ["critical", "production", "database", "server", "financial", "pii", "sensitive"]
+    factors["critical_asset"] = any(kw in content for kw in asset_keywords)
+
+    # Factor 7: Task type complexity
+    complex_task_types = [TaskType.TRIAGE, TaskType.ANALYSIS, TaskType.CODE_REVIEW]
+    factors["complex_task"] = request.task_type in complex_task_types
+
+    # Factor 8: Message length (longer = more complex context)
+    total_length = sum(len(msg.get("content", "")) for msg in request.messages)
+    factors["long_context"] = total_length > 2000
+
+    # Calculate complexity score
+    factor_count = sum(1 for v in factors.values() if v)
+
+    if factor_count >= 4:
+        complexity = "high"
+    elif factor_count >= 2:
+        complexity = "medium"
+    else:
+        complexity = "low"
+
+    logger.info(
+        f"Complexity analysis: {complexity} (factors: {factor_count}/8)",
+        extra={"complexity": complexity, "factors": factors, "iocs_found": total_iocs}
+    )
+
+    return complexity, factors
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
@@ -169,13 +306,16 @@ app.add_middleware(
 
 def route_request(request: LLMRequest) -> RouterDecision:
     """
-    Route request to optimal model based on task and context.
+    Route request to optimal model based on task, context, and complexity.
 
     Routing strategy:
     1. If model specified, use it
-    2. Match task type to model capabilities
-    3. Consider cost vs quality tradeoff
-    4. Check request complexity (token count)
+    2. Analyze complexity using IOC extraction and content analysis
+    3. Select model based on complexity:
+       - high complexity -> DeepSeek-V3 (deep reasoning)
+       - medium complexity -> Qwen3-Max or Qwen3-Plus (balanced)
+       - low complexity -> Qwen3-Turbo (fast response)
+    4. Match task type to model capabilities
     5. Apply fallback logic if needed
     """
     # If user specified a model, use it
@@ -194,40 +334,61 @@ def route_request(request: LLMRequest) -> RouterDecision:
             alternatives=[],
         )
 
-    # Calculate request complexity
+    # Step 1: Analyze complexity
+    complexity, complexity_factors = analyze_complexity(request)
+
+    # Step 2: Calculate token count
     total_tokens = sum(len(msg.get("content", "")) // 4 for msg in request.messages)
 
-    # Select based on task type
+    # Step 3: Select model based on complexity
     selected_model: Optional[LLMModel] = None
     reason = ""
     confidence = 0.8
 
-    # Priority: match task type to best models
-    for model, caps in MODEL_CAPABILITIES.items():
-        if request.task_type in caps.best_for:
-            # Consider complexity
-            if total_tokens > caps.max_context:
-                continue  # Skip if context too large
+    if complexity == "high":
+        # High complexity: Use DeepSeek-V3 for deep reasoning
+        # Prefer DeepSeek-V3 if available, otherwise use Qwen3-Max
+        if total_tokens <= MODEL_CAPABILITIES[LLMModel.DEEPSEEK_V3].max_context:
+            selected_model = LLMModel.DEEPSEEK_V3
+            reason = f"High complexity request (factors: {sum(complexity_factors.values())}), using deep reasoning model"
+            confidence = 0.95
+        else:
+            # Context too large, use Qwen3-Max with larger context
+            selected_model = LLMModel.QWEN3_MAX
+            reason = f"High complexity with large context, using extended context model"
+            confidence = 0.9
 
-            # Select best match
-            if (
-                not selected_model
-                or caps.reasoning_quality > MODEL_CAPABILITIES[selected_model].reasoning_quality
-            ):
-                selected_model = model
-                reason = f"Best match for {request.task_type} task"
-                confidence = 0.9
+    elif complexity == "medium":
+        # Medium complexity: Use Qwen3-Max or Qwen3-Plus for balanced performance
+        if request.task_type in [TaskType.TRIAGE, TaskType.ANALYSIS]:
+            selected_model = LLMModel.QWEN3_MAX
+            reason = f"Medium complexity {request.task_type} task, using balanced model with high reasoning"
+            confidence = 0.9
+        else:
+            selected_model = LLMModel.QWEN3_PLUS
+            reason = f"Medium complexity {request.task_type} task, using balanced model"
+            confidence = 0.85
 
-    # Fallback to default if no match
-    if not selected_model:
+    else:
+        # Low complexity: Use Qwen3-Turbo for fast response
         selected_model = LLMModel.QWEN3_TURBO
-        reason = "Default model for general tasks"
-        confidence = 0.7
+        reason = f"Low complexity request, using fast response model"
+        confidence = 0.85
 
-    # Determine provider from model
+    # Step 4: Verify model can handle the request
+    caps = MODEL_CAPABILITIES.get(selected_model)
+    if caps and total_tokens > caps.max_context:
+        # Find a model with larger context
+        for model, model_caps in MODEL_CAPABILITIES.items():
+            if model_caps.max_context >= total_tokens:
+                selected_model = model
+                reason += f" (switched to {model.value} for context size)"
+                break
+
+    # Step 5: Determine provider from model
     provider = LLMProvider.DEEPSEEK if "deepseek" in selected_model.value else LLMProvider.QWEN
 
-    # Get alternatives
+    # Get alternatives based on task type
     alternatives = [
         m
         for m in MODEL_CAPABILITIES.keys()
@@ -519,6 +680,36 @@ async def route_test(request: LLMRequest):
 
     return SuccessResponse(
         data=decision,
+        meta=ResponseMeta(
+            timestamp=datetime.utcnow(),
+            request_id=str(uuid.uuid4()),
+        ),
+    )
+
+
+@app.post("/api/v1/analyze-complexity", response_model=SuccessResponse[Dict[str, Any]])
+async def analyze_request_complexity(request: LLMRequest):
+    """
+    Analyze request complexity without routing.
+
+    Returns detailed complexity analysis including:
+    - Complexity level (high/medium/low)
+    - Detected IOCs (IPs, hashes, URLs, domains, CVEs)
+    - Complexity factors that influenced the decision
+    """
+    complexity, factors = analyze_complexity(request)
+    iocs = extract_iocs(request.messages)
+
+    return SuccessResponse(
+        data={
+            "complexity_level": complexity,
+            "complexity_factors": factors,
+            "factor_count": sum(1 for v in factors.values() if v),
+            "iocs_detected": iocs,
+            "total_iocs": sum(len(v) for v in iocs.values()),
+            "message_count": len(request.messages),
+            "estimated_tokens": sum(len(msg.get("content", "")) // 4 for msg in request.messages),
+        },
         meta=ResponseMeta(
             timestamp=datetime.utcnow(),
             request_id=str(uuid.uuid4()),

@@ -88,12 +88,8 @@ services:
       - "8001:8000"
     volumes:
       - chroma_data:/chroma/chroma
-    healthcheck:
-      test: curl -f http://localhost:8000/api/v1/heartbeat || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+    # Health check disabled - ChromaDB image doesn't have curl/wget
+    # The service is ready when it starts accepting connections
     networks:
       - security-triage-network
     restart: unless-stopped
@@ -467,6 +463,43 @@ services:
       - security-triage-network
     restart: unless-stopped
 
+  # Attack Chain Analyzer Service
+  attack-chain-analyzer:
+    build:
+      context: .
+      dockerfile: services/attack_chain_analyzer/Dockerfile
+    container_name: security-triage-attack-chain-analyzer
+    environment:
+      # Database
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://triage_user:${DB_PASSWORD:-triage_password_change_me}@postgres:5432/security_triage}
+      # Redis
+      REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0}
+      # RabbitMQ
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:${RABBITMQ_PASSWORD:-rabbitmq_password_change_me}@rabbitmq:5672/}
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-to-a-random-secret-key-in-production}
+      # Application
+      HOST: 0.0.0.0
+      PORT: 8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DEBUG: "false"
+    ports:
+      - "9510:8000"    # Attack Chain Analyzer direct access
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - security-triage-network
+    restart: unless-stopped
+
   # Similarity Search Service
   similarity-search:
     build:
@@ -485,6 +518,8 @@ services:
       CHROMADB_PORT: ${CHROMADB_PORT:-8000}
       # Embedding Model
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-to-a-random-secret-key-in-production}
       # Application
       HOST: 0.0.0.0
       PORT: 8000
@@ -502,7 +537,7 @@ services:
       rabbitmq:
         condition: service_healthy
       chromadb:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: curl -f http://localhost:8000/health || exit 1
       interval: 10s
@@ -825,7 +860,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DEBUG: "false"
     ports:
-      - "3000:8000"    # Web Dashboard frontend
+      - "3100:8000"    # Web Dashboard frontend (changed from 3000 due to port conflict)
     depends_on:
       data-analytics:
         condition: service_healthy

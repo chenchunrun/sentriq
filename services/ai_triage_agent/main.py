@@ -954,6 +954,11 @@ async def health_check():
             "status": "healthy",
             "service": "ai-triage-agent",
             "timestamp": datetime.utcnow().isoformat(),
+            "capabilities": {
+                "langchain_agent": True,
+                "tool_based_analysis": True,
+                "attack_chain_analysis": True,
+            },
             "checks": {
                 "database": "connected" if db_manager else "disconnected",
                 "message_queue_consumer": "connected" if consumer else "disconnected",
@@ -1003,6 +1008,123 @@ async def manual_triage(
         }
     except Exception as e:
         logger.error(f"Manual triage failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+@app.post("/api/v1/triage/agent", tags=["Triage"])
+async def agent_triage(
+    alert: SecurityAlert,
+    enrichment: Dict[str, Any] = None,
+    use_agent: bool = True,
+):
+    """
+    Triage an alert using LangChain agent with tool calling.
+
+    This endpoint uses a LangChain agent that can call multiple tools
+    to gather context and perform comprehensive analysis.
+
+    Args:
+        alert: SecurityAlert to triage
+        enrichment: Optional enrichment data
+        use_agent: Whether to use agent-based analysis (default: True)
+
+    Returns:
+        Comprehensive triage result with tool-based analysis
+    """
+    try:
+        if not use_agent:
+            # Fall back to standard triage
+            result = await triage_alert(alert, enrichment)
+            return {
+                "success": True,
+                "data": result,
+                "method": "standard",
+            }
+
+        # Import agent
+        from .agent.triage_agent import TriageAgent
+
+        # Get API configuration
+        api_key = os.getenv("QWEN_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "")
+        base_url = os.getenv("QWEN_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL")
+        model = os.getenv("LLM_MODEL", "qwen-plus")
+
+        if not api_key:
+            # Fall back to standard triage if no API key
+            logger.warning("No LLM API key configured, falling back to standard triage")
+            result = await triage_alert(alert, enrichment)
+            return {
+                "success": True,
+                "data": result,
+                "method": "standard_fallback",
+                "warning": "No LLM API key configured",
+            }
+
+        # Create agent and analyze
+        agent = TriageAgent(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
+
+        result = await agent.analyze_alert(alert.model_dump(), enrichment)
+
+        logger.info(f"Agent triage completed for {alert.alert_id}")
+
+        return {
+            "success": True,
+            "data": result,
+            "method": "langchain_agent",
+        }
+
+    except Exception as e:
+        logger.error(f"Agent triage failed: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+@app.post("/api/v1/analyze-chain", tags=["Analysis"])
+async def analyze_attack_chain(alerts: List[Dict[str, Any]]):
+    """
+    Analyze a sequence of alerts for attack chain patterns.
+
+    Calls the Attack Chain Analyzer service to perform MITRE ATT&CK mapping.
+
+    Args:
+        alerts: List of alert dictionaries
+
+    Returns:
+        Attack chain analysis with MITRE techniques and kill chain phase
+    """
+    try:
+        attack_chain_url = os.getenv("ATTACK_CHAIN_URL", "http://attack-chain-analyzer:8000")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{attack_chain_url}/api/v1/analyze-chain",
+                json={"alerts": alerts},
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "success": True,
+                    "data": data.get("data", {}),
+                }
+            else:
+                logger.error(f"Attack chain analyzer returned {response.status_code}")
+                return {
+                    "success": False,
+                    "error": f"Attack chain analyzer error: {response.status_code}",
+                }
+
+    except Exception as e:
+        logger.error(f"Attack chain analysis failed: {e}", exc_info=True)
         return {
             "success": False,
             "error": str(e),

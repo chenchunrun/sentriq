@@ -15,6 +15,7 @@
 """Similarity Search Service - Uses ChromaDB for vector similarity search."""
 
 import json
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -23,7 +24,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from shared.database import get_database_manager
+from shared.database import get_database_manager, init_database, close_database
 from shared.messaging import MessageConsumer
 from shared.models import (
     EmbeddingModel,
@@ -124,8 +125,10 @@ def alert_to_text(alert: SecurityAlert) -> str:
     if alert.url:
         parts.append(f"URL: {alert.url}")
 
-    if alert.process_name:
-        parts.append(f"Process: {alert.process_name}")
+    # Safely access optional attributes
+    process_name = getattr(alert, "process_name", None)
+    if process_name:
+        parts.append(f"Process: {process_name}")
 
     return ". ".join(parts)
 
@@ -146,34 +149,49 @@ async def lifespan(app: FastAPI):
 
     logger.info("Starting Similarity Search service...")
 
-    # Initialize database
-    db_manager = get_database_manager()
-    await db_manager.initialize()
-
-    # Initialize embedding model
-    embedding_model = initialize_embedding_model("all-MiniLM-L6-v2")
-
-    # Initialize ChromaDB
-    chroma_client, collection = initialize_chromadb()
-
-    # Initialize message consumer (optional, for indexing alerts)
     try:
-        consumer = MessageConsumer(config.rabbitmq_url, "alert.result")
-        await consumer.connect()
-        # Start background task to consume triage results
-        # asyncio.create_task(index_triaged_alerts())
+        # Initialize database FIRST
+        await init_database(
+            database_url=config.database_url,
+            pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+            max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+            echo=config.debug,
+        )
+        db_manager = get_database_manager()
+        logger.info("✓ Database connected")
+
+        # Initialize embedding model
+        embedding_model = initialize_embedding_model("all-MiniLM-L6-v2")
+        logger.info("✓ Embedding model initialized")
+
+        # Initialize ChromaDB
+        chroma_client, collection = initialize_chromadb()
+        logger.info("✓ ChromaDB initialized")
+
+        # Initialize message consumer (optional, for indexing alerts)
+        try:
+            consumer = MessageConsumer(config.rabbitmq_url, "alert.result")
+            await consumer.connect()
+            logger.info("✓ Message consumer connected")
+        except Exception as e:
+            logger.warning(f"Could not connect to message queue: {e}")
+
+        logger.info("✓ Similarity Search service started successfully")
+
+        yield
+
     except Exception as e:
-        logger.warning(f"Could not connect to message queue: {e}")
+        logger.error(f"Failed to start service: {e}")
+        raise
 
-    logger.info("Similarity Search service started successfully")
-
-    yield
-
-    # Cleanup
-    if consumer:
-        await consumer.close()
-    await db_manager.close()
-    logger.info("Similarity Search service stopped")
+    finally:
+        # Cleanup
+        if consumer:
+            await consumer.close()
+            logger.info("✓ Message consumer closed")
+        await close_database()
+        logger.info("✓ Database connection closed")
+        logger.info("✓ Similarity Search service stopped")
 
 
 app = FastAPI(
