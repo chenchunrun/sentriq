@@ -20,17 +20,18 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from shared.database import DatabaseManager, close_database, get_database_manager, init_database
 from shared.utils import Config, get_logger
 from shared.utils.crypto import encrypt_value, decrypt_value, safe_decrypt
+from alert_create import build_alert_create_payload
 
 logger = get_logger(__name__)
 config = Config()
@@ -61,6 +62,9 @@ SERVICE_URLS = {
     "workflow": os.getenv("WORKFLOW_SERVICE_URL", "http://workflow-engine:8000"),
     "automation": os.getenv("AUTOMATION_SERVICE_URL", "http://automation-orchestrator:8000"),
 }
+
+USE_ANALYTICS_SERVICE = os.getenv("ANALYTICS_USE_SERVICE", "true").lower() == "true"
+USE_REPORTING_SERVICE = os.getenv("REPORTING_USE_SERVICE", "true").lower() == "true"
 
 
 @asynccontextmanager
@@ -105,9 +109,16 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
-# Mount static files - mount at both /static and /assets for compatibility
-app.mount("/assets", StaticFiles(directory="/app/static/assets"), name="assets")
-app.mount("/static", StaticFiles(directory="/app/static"), name="static")
+# Get the base directory for static files
+BASE_DIR = Path(__file__).parent
+
+# Mount static files - prefer Docker build assets if present
+if (Path("/app/static") / "assets").exists():
+    app.mount("/assets", StaticFiles(directory="/app/static/assets"), name="assets")
+    app.mount("/static", StaticFiles(directory="/app/static"), name="static")
+elif (BASE_DIR / "dist" / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(BASE_DIR / "dist" / "assets")), name="assets")
+    app.mount("/static", StaticFiles(directory=str(BASE_DIR / "dist")), name="static")
 
 
 # API Proxy endpoints - Forward requests to backend services
@@ -186,6 +197,118 @@ async def proxy_request(service: str, path: str, request: Request):
         )
 
 
+async def call_service_json(
+    service: str,
+    path: str,
+    method: str = "GET",
+    params: Optional[Dict[str, Any]] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Call a backend service and return JSON response or None on failure."""
+    service_url = SERVICE_URLS.get(service)
+    if not service_url:
+        return None
+
+    path = path if path.startswith("/") else f"/{path}"
+    url = f"{service_url}/api/v1{path}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            if method == "GET":
+                response = await client.get(url, params=params, timeout=15.0)
+            elif method == "POST":
+                response = await client.post(url, json=json_body, timeout=30.0)
+            elif method == "PUT":
+                response = await client.put(url, json=json_body, timeout=30.0)
+            elif method == "DELETE":
+                response = await client.delete(url, timeout=30.0)
+            else:
+                return None
+
+            response.raise_for_status()
+            return response.json()
+    except Exception as e:
+        logger.warning(f"Service call failed: {service}{path}: {e}")
+        return None
+
+
+async def call_service_raw(
+    service: str,
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Call a backend service and return raw response data."""
+    service_url = SERVICE_URLS.get(service)
+    if not service_url:
+        return None
+
+    path = path if path.startswith("/") else f"/{path}"
+    url = f"{service_url}/api/v1{path}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=30.0)
+            return {
+                "status_code": response.status_code,
+                "headers": dict(response.headers),
+                "content": response.content,
+            }
+    except Exception as e:
+        logger.warning(f"Service raw call failed: {service}{path}: {e}")
+        return None
+
+
+def map_ui_report_type_to_service(report_type: str, schedule: Optional[Dict[str, Any]] = None) -> str:
+    """Map UI report type to reporting-service report_type."""
+    schedule = schedule or {}
+    frequency = schedule.get("frequency")
+
+    if report_type == "trends":
+        return "trend_analysis"
+    if report_type == "custom":
+        return "custom"
+    if report_type == "metrics":
+        if frequency == "monthly":
+            return "monthly_summary"
+        if frequency == "weekly":
+            return "weekly_summary"
+        if frequency == "daily":
+            return "daily_summary"
+        return "weekly_summary"
+    # alerts default
+    if frequency == "monthly":
+        return "monthly_summary"
+    if frequency == "weekly":
+        return "weekly_summary"
+    return "daily_summary"
+
+
+def map_service_report_type_to_ui(report_type: Optional[str]) -> str:
+    """Map reporting-service report_type to UI report type."""
+    if not report_type:
+        return "alerts"
+    if report_type == "trend_analysis":
+        return "trends"
+    if report_type == "custom":
+        return "custom"
+    if report_type == "incident_report":
+        return "alerts"
+    if report_type in ("weekly_summary", "monthly_summary"):
+        return "metrics"
+    return "alerts"
+
+
+def map_report_format_for_service(format_type: Optional[str]) -> str:
+    """Map UI format to reporting-service format."""
+    if not format_type:
+        return "html"
+    if format_type == "pdf":
+        return "html"
+    if format_type == "excel":
+        return "csv"
+    return format_type
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
@@ -226,6 +349,8 @@ async def login(request: Request):
         username = credentials.get("username")
         password = credentials.get("password")
 
+        logger.info("Login attempt received")
+
         if not username or not password:
             return JSONResponse(
                 content={"success": False, "error": "Username and password are required"},
@@ -237,6 +362,7 @@ async def login(request: Request):
             user = await authenticate_user(session, username, password)
 
             if not user:
+                logger.warning("Authentication failed - invalid credentials")
                 return JSONResponse(
                     content={"success": False, "error": "Invalid username or password"},
                     status_code=401,
@@ -251,7 +377,7 @@ async def login(request: Request):
 
             access_token = create_access_token(token_data)
 
-            logger.info(f"User '{username}' logged in successfully")
+            logger.info("User logged in successfully")
 
             return {
                 "success": True,
@@ -291,7 +417,9 @@ async def get_current_user(request: Request):
     try:
         # Extract token from Authorization header
         auth_header = request.headers.get("Authorization")
+
         if not auth_header or not auth_header.startswith("Bearer "):
+            logger.warning("Missing or invalid Authorization header")
             return JSONResponse(
                 content={"success": False, "error": "Missing or invalid Authorization header"},
                 status_code=401,
@@ -302,28 +430,36 @@ async def get_current_user(request: Request):
         # Decode and validate token
         payload = decode_access_token(token)
         if not payload:
+            logger.warning("Invalid or expired token")
             return JSONResponse(
                 content={"success": False, "error": "Invalid or expired token"},
                 status_code=401,
             )
 
+        logger.info("Token decoded successfully")
+
         # Get user from database
         user_id = payload.get("sub")
         if not user_id:
+            logger.warning("Invalid token payload - no sub")
             return JSONResponse(
                 content={"success": False, "error": "Invalid token payload"},
                 status_code=401,
             )
 
+        logger.info(f"Fetching user: {user_id}")
+
         async with db_manager.get_session() as session:
             user = await get_user_by_id(session, user_id)
 
             if not user:
+                logger.warning(f"User not found: {user_id}")
                 return JSONResponse(
                     content={"success": False, "error": "User not found"},
                     status_code=404,
                 )
 
+            logger.info(f"User found: {user.username}")
             return {
                 "success": True,
                 "data": user_to_dict(user),
@@ -373,6 +509,20 @@ async def refresh_token(request: Request):
 async def get_metrics():
     """Get dashboard metrics from database."""
     try:
+        if USE_ANALYTICS_SERVICE:
+            service_resp = await call_service_json(
+                "analytics",
+                "/metrics/alerts",
+                params={"time_range": "last_24h"},
+            )
+            if service_resp and service_resp.get("success"):
+                data = service_resp.get("data") or {}
+                data.setdefault("by_status", {})
+                data.setdefault("avg_resolution_time", 0.0)
+                data.setdefault("mtta", 0.0)
+                data.setdefault("mttr", data.get("avg_resolution_time", 0.0))
+                return {"success": True, "data": data}
+
         async with db_manager.get_session() as session:
             from sqlalchemy import select, func, case
             from shared.database.models import Alert
@@ -481,6 +631,42 @@ async def get_trends(
 ):
     """Get alert trends over time."""
     try:
+        if USE_ANALYTICS_SERVICE:
+            time_range_map = {
+                "hour": "last_24h",
+                "day": "last_24h",
+                "week": "last_7d",
+                "month": "last_30d",
+            }
+            daily_resp = await call_service_json(
+                "analytics",
+                "/trends/alert_volume",
+                params={"time_range": time_range_map.get("day", "last_24h")},
+            )
+            weekly_resp = await call_service_json(
+                "analytics",
+                "/trends/alert_volume",
+                params={"time_range": time_range_map.get("week", "last_7d")},
+            )
+            monthly_resp = await call_service_json(
+                "analytics",
+                "/trends/alert_volume",
+                params={"time_range": time_range_map.get("month", "last_30d")},
+            )
+
+            if daily_resp and weekly_resp and monthly_resp:
+                daily = daily_resp.get("data", {}).get("trends", [])
+                weekly = weekly_resp.get("data", {}).get("trends", [])
+                monthly = monthly_resp.get("data", {}).get("trends", [])
+                return {
+                    "success": True,
+                    "data": {
+                        "daily": daily,
+                        "weekly": weekly,
+                        "monthly": monthly,
+                    },
+                }
+
         from datetime import timedelta, datetime
         from sqlalchemy import select, func
         from shared.database.models import Alert
@@ -915,52 +1101,20 @@ async def create_alert(request: Request):
     try:
         import json
         import uuid
-        from sqlalchemy import select
-        from shared.database.models import Alert
         from shared.database.repositories import AlertRepository
 
         body = await request.body()
         data = json.loads(body) if body else {}
 
-        # Extract alert data
-        title = data.get("title")
-        description = data.get("description")
-        severity = data.get("severity", "medium")
-        alert_type = data.get("type", "other")
-        source_ip = data.get("source_ip")
-        destination_ip = data.get("destination_ip")
-        source_port = data.get("source_port")
-        destination_port = data.get("destination_port")
-        protocol = data.get("protocol")
-        status = data.get("status", "pending")
-
-        if not title:
-            return JSONResponse(
-                content={"success": False, "error": "title is required"},
-                status_code=400,
-            )
-
         # Generate alert ID
         alert_id = f"ALT-{uuid.uuid4().hex[:12].upper()}"
+        alert_payload = build_alert_create_payload(data, alert_id)
 
         async with db_manager.get_session() as session:
             repo = AlertRepository(session)
 
             # Create alert
-            alert = await repo.create_alert(
-                alert_id=alert_id,
-                title=title,
-                description=description,
-                severity=severity,
-                alert_type=alert_type,
-                source_ip=source_ip,
-                destination_ip=destination_ip,
-                source_port=source_port,
-                destination_port=destination_port,
-                protocol=protocol,
-                status=status,
-                created_by="user",
-            )
+            alert = await repo.create_alert(alert_payload)
 
             logger.info(f"Created new alert {alert_id}")
 
@@ -972,8 +1126,8 @@ async def create_alert(request: Request):
                 "severity": alert.severity,
                 "alert_type": alert.alert_type,
                 "status": alert.status,
-                "source_ip": alert.source_ip,
-                "destination_ip": alert.destination_ip,
+                "source_ip": str(alert.source_ip) if alert.source_ip else None,
+                "destination_ip": str(alert.destination_ip) if alert.destination_ip else None,
                 "source_port": alert.source_port,
                 "destination_port": alert.destination_port,
                 "protocol": alert.protocol,
@@ -986,6 +1140,11 @@ async def create_alert(request: Request):
                 "data": alert_dict,
             }
     except Exception as e:
+        if isinstance(e, ValueError):
+            return JSONResponse(
+                content={"success": False, "error": str(e)},
+                status_code=400,
+            )
         logger.error(f"Error creating alert: {e}", exc_info=True)
         return JSONResponse(
             content={"success": False, "error": str(e)},
@@ -1261,6 +1420,61 @@ async def delete_notification(notification_id: str):
 async def get_reports():
     """Get list of all reports."""
     try:
+        if USE_REPORTING_SERVICE:
+            service_resp = await call_service_json("reporting", "/reports")
+            if service_resp and service_resp.get("success"):
+                service_reports = service_resp.get("data", {}).get("reports", [])
+                report_ids = [
+                    report.get("report_id") or report.get("id")
+                    for report in service_reports
+                    if report.get("report_id") or report.get("id")
+                ]
+
+                local_reports_by_id: Dict[str, Any] = {}
+                if report_ids:
+                    async with db_manager.get_session() as session:
+                        from sqlalchemy import select
+                        from shared.database.models import Report
+
+                        query = select(Report).where(Report.report_id.in_(report_ids))
+                        result = await session.execute(query)
+                        local_reports = result.scalars().all()
+                        local_reports_by_id = {r.report_id: r for r in local_reports}
+
+                reports_data = []
+                for report in service_reports:
+                    report_id = report.get("report_id") or report.get("id")
+                    local = local_reports_by_id.get(report_id)
+                    report_type = local.report_type if local else map_service_report_type_to_ui(report.get("report_type"))
+                    format_type = local.format if local else "pdf"
+                    name = local.name if local else f"{(report.get('report_type') or 'report').replace('_', ' ').title()} Report"
+                    description = local.description if local else None
+                    created_at = (
+                        local.created_at.isoformat()
+                        if local and local.created_at
+                        else report.get("created_at")
+                    )
+                    created_by = local.created_by if local else "system"
+                    status = report.get("status") or (local.status if local else "pending")
+
+                    reports_data.append({
+                        "id": report_id,
+                        "name": name,
+                        "description": description,
+                        "type": report_type,
+                        "format": format_type,
+                        "status": status,
+                        "file_url": f"/api/v1/reports/{report_id}/download" if report_id else None,
+                        "created_at": created_at,
+                        "created_by": created_by,
+                        "related_alerts": local.related_alerts if local and hasattr(local, 'related_alerts') else [],
+                    })
+
+                return {
+                    "success": True,
+                    "data": reports_data,
+                }
+
         async with db_manager.get_session() as session:
             from sqlalchemy import select, desc
             from shared.database.models import Report
@@ -1300,6 +1514,56 @@ async def get_reports():
 async def get_report(report_id: str):
     """Get single report by ID."""
     try:
+        if USE_REPORTING_SERVICE:
+            service_resp = await call_service_json("reporting", f"/reports/{report_id}")
+            if service_resp and service_resp.get("success"):
+                report = service_resp.get("data", {}) or {}
+
+                local = None
+                async with db_manager.get_session() as session:
+                    from sqlalchemy import select
+                    from shared.database.models import Report
+
+                    query = select(Report).where(Report.report_id == report_id)
+                    result = await session.execute(query)
+                    local = result.scalar_one_or_none()
+
+                report_type = local.report_type if local else map_service_report_type_to_ui(report.get("report_type"))
+                format_type = local.format if local else "pdf"
+                name = local.name if local else f"{(report.get('report_type') or 'report').replace('_', ' ').title()} Report"
+                description = local.description if local else None
+                created_at = (
+                    local.created_at.isoformat()
+                    if local and local.created_at
+                    else report.get("created_at")
+                )
+                created_by = local.created_by if local else "system"
+                status = report.get("status") or (local.status if local else "pending")
+                completed_at = (
+                    local.completed_at.isoformat()
+                    if local and local.completed_at
+                    else report.get("completed_at")
+                )
+                error_message = local.error_message if local else report.get("error")
+
+                return {
+                    "success": True,
+                    "data": {
+                        "id": report_id,
+                        "name": name,
+                        "description": description,
+                        "type": report_type,
+                        "format": format_type,
+                        "status": status,
+                        "file_url": f"/api/v1/reports/{report_id}/download",
+                        "created_at": created_at,
+                        "created_by": created_by,
+                        "completed_at": completed_at,
+                        "error_message": error_message,
+                        "related_alerts": local.related_alerts if local and hasattr(local, 'related_alerts') else [],
+                    },
+                }
+
         async with db_manager.get_session() as session:
             from sqlalchemy import select
             from shared.database.models import Report
@@ -1360,6 +1624,79 @@ async def create_report(request: Request):
                 status_code=400,
             )
 
+        if USE_REPORTING_SERVICE:
+            service_report_type = map_ui_report_type_to_service(report_type, schedule)
+            service_payload: Dict[str, Any] = {"report_type": service_report_type}
+            report_date = data.get("date") or filters.get("date")
+            if report_date:
+                service_payload["date"] = report_date
+
+            if service_report_type == "incident_report":
+                alert_id = filters.get("alert_id") or data.get("alert_id")
+                if not alert_id:
+                    return JSONResponse(
+                        content={"success": False, "error": "alert_id is required for incident reports"},
+                        status_code=400,
+                    )
+                service_payload["alert_id"] = alert_id
+
+            if filters:
+                service_payload["parameters"] = filters
+
+            service_resp = await call_service_json(
+                "reporting",
+                "/reports/generate",
+                method="POST",
+                json_body=service_payload,
+            )
+
+            if service_resp and service_resp.get("success"):
+                report_id = service_resp.get("data", {}).get("report_id")
+                status = service_resp.get("data", {}).get("status", "pending")
+
+                if not report_id:
+                    return JSONResponse(
+                        content={"success": False, "error": "Reporting service did not return report_id"},
+                        status_code=502,
+                    )
+
+                async with db_manager.get_session() as session:
+                    from shared.database.models import Report
+
+                    new_report = Report(
+                        report_id=report_id,
+                        name=name,
+                        description=description,
+                        report_type=report_type,
+                        format=format_type,
+                        status=status,
+                        filters=filters,
+                        created_by="system",  # TODO: Get from auth token
+                        schedule_frequency=schedule.get("frequency") if schedule else None,
+                        schedule_time=schedule.get("time") if schedule else None,
+                        schedule_recipients=schedule.get("recipients") if schedule else None,
+                    )
+
+                    session.add(new_report)
+                    await session.commit()
+                    await session.refresh(new_report)
+
+                    return {
+                        "success": True,
+                        "data": {
+                            "id": new_report.report_id,
+                            "name": new_report.name,
+                            "description": new_report.description,
+                            "type": new_report.report_type,
+                            "format": new_report.format,
+                            "status": new_report.status,
+                            "created_at": new_report.created_at.isoformat(),
+                            "created_by": new_report.created_by,
+                        },
+                    }
+
+            logger.warning("Reporting service unavailable; falling back to local report generation")
+
         report_id = f"RPT-{report_type.upper()}-{uuid.uuid4().hex[:8]}"
 
         async with db_manager.get_session() as session:
@@ -1376,6 +1713,7 @@ async def create_report(request: Request):
                 created_by="system",  # TODO: Get from auth token
                 schedule_frequency=schedule.get("frequency") if schedule else None,
                 schedule_time=schedule.get("time") if schedule else None,
+                schedule_recipients=schedule.get("recipients") if schedule else None,
             )
 
             session.add(new_report)
@@ -1692,6 +2030,42 @@ async def generate_pdf_report(data: dict, file_path: FilePath, title: str):
 async def download_report(report_id: str):
     """Download report file or generate content for preview."""
     try:
+        if USE_REPORTING_SERVICE:
+            format_type = None
+            async with db_manager.get_session() as session:
+                from sqlalchemy import select
+                from shared.database.models import Report
+
+                query = select(Report).where(Report.report_id == report_id)
+                result = await session.execute(query)
+                local = result.scalar_one_or_none()
+                if local:
+                    format_type = local.format
+
+            service_format = map_report_format_for_service(format_type)
+            service_resp = await call_service_raw(
+                "reporting",
+                f"/reports/{report_id}/download",
+                params={"format": service_format},
+            )
+            if service_resp:
+                status_code = service_resp.get("status_code", 200)
+                if status_code >= 400:
+                    return JSONResponse(
+                        content={"success": False, "error": f"Reporting service error ({status_code})"},
+                        status_code=status_code,
+                    )
+                headers = {}
+                content_type = service_resp.get("headers", {}).get("content-type", "application/octet-stream")
+                content_disposition = service_resp.get("headers", {}).get("content-disposition")
+                if content_disposition:
+                    headers["Content-Disposition"] = content_disposition
+                return Response(
+                    content=service_resp.get("content", b""),
+                    media_type=content_type,
+                    headers=headers,
+                )
+
         async with db_manager.get_session() as session:
             from sqlalchemy import select
             from shared.database.models import Report
@@ -1708,7 +2082,6 @@ async def download_report(report_id: str):
 
             # If file doesn't exist, generate it on-the-fly
             if not report.file_path or not FilePath(report.file_path).exists():
-                from fastapi.responses import Response
                 import json
                 from datetime import datetime
 
@@ -1867,6 +2240,15 @@ Metrics,150,5,25,60,60"""
 async def delete_report(report_id: str):
     """Delete report."""
     try:
+        if USE_REPORTING_SERVICE:
+            service_resp = await call_service_json(
+                "reporting",
+                f"/reports/{report_id}",
+                method="DELETE",
+            )
+            if service_resp and not service_resp.get("success"):
+                logger.warning(f"Reporting service delete failed for {report_id}")
+
         async with db_manager.get_session() as session:
             from sqlalchemy import select
             from shared.database.models import Report
@@ -2450,6 +2832,64 @@ async def get_workflows(alert_id: str = None):
             }
     except Exception as e:
         logger.error(f"Error fetching workflows: {e}", exc_info=True)
+        return JSONResponse(
+            content={"success": False, "error": str(e)},
+            status_code=500,
+        )
+
+
+@app.get("/api/v1/workflows/executions")
+async def list_workflow_executions(
+    status: str = None,
+    workflow_id: str = None,
+    limit: int = 100,
+):
+    """List workflow execution records."""
+    try:
+        from sqlalchemy import select, desc
+        from shared.database.models import WorkflowExecution
+
+        async with db_manager.get_session() as session:
+            query = select(WorkflowExecution).order_by(desc(WorkflowExecution.started_at)).limit(limit)
+
+            if status:
+                query = query.where(WorkflowExecution.status == status)
+            if workflow_id:
+                query = query.where(WorkflowExecution.workflow_id == workflow_id)
+
+            result = await session.execute(query)
+            executions = result.scalars().all()
+
+            data = []
+            for execution in executions:
+                steps = execution.steps_execution or []
+                if isinstance(steps, dict):
+                    steps = steps.get("steps", []) or []
+
+                current_step = None
+                for step in steps:
+                    if isinstance(step, dict) and step.get("status") == "running":
+                        current_step = step.get("name") or step.get("step_id")
+                        break
+
+                data.append(
+                    {
+                        "workflow_id": execution.workflow_id,
+                        "execution_id": execution.execution_id,
+                        "status": execution.status,
+                        "current_step": current_step,
+                        "started_at": execution.started_at.isoformat(),
+                        "completed_at": execution.completed_at.isoformat()
+                        if execution.completed_at
+                        else None,
+                        "alert_id": execution.trigger_reference,
+                        "steps": steps,
+                    }
+                )
+
+            return {"success": True, "data": data}
+    except Exception as e:
+        logger.error(f"Error fetching workflow executions: {e}", exc_info=True)
         return JSONResponse(
             content={"success": False, "error": str(e)},
             status_code=500,
@@ -3335,10 +3775,14 @@ async def startup_event():
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
     """Serve React SPA for all non-API routes."""
+    # Prefer Docker /app/static, fallback to local dist
     index_path = Path("/app/static/index.html")
+    if not index_path.exists():
+        index_path = BASE_DIR / "dist" / "index.html"
+
     if index_path.exists():
         return FileResponse(
-            index_path,
+            str(index_path),
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
@@ -3354,16 +3798,25 @@ async def serve_spa(full_path: str):
 @app.get("/")
 async def root():
     """Root route - serve React SPA."""
+    # Prefer Docker /app/static, fallback to local dist
     index_path = Path("/app/static/index.html")
+    logger.info(f"Looking for frontend at: {index_path}, exists: {index_path.exists()}")
+
+    if not index_path.exists():
+        index_path = BASE_DIR / "dist" / "index.html"
+        logger.info(f"Trying Docker path: {index_path}, exists: {index_path.exists()}")
+
     if index_path.exists():
+        logger.info(f"Serving frontend from: {index_path}")
         return FileResponse(
-            index_path,
+            str(index_path),
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
                 "Expires": "0",
             }
         )
+    logger.error(f"Frontend not found at either location!")
     return JSONResponse(
         content={"success": False, "error": "Frontend not built"},
         status_code=503,

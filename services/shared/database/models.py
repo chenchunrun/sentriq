@@ -35,7 +35,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, INET, UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -168,9 +168,9 @@ class Alert(Base):
     description: Mapped[Optional[str]] = mapped_column(Text)
 
     # Network information
-    source_ip: Mapped[Optional[str]] = mapped_column(String(45))
+    source_ip: Mapped[Optional[str]] = mapped_column(INET)
     source_port: Mapped[Optional[int]] = mapped_column(Integer)
-    destination_ip: Mapped[Optional[str]] = mapped_column(String(45))
+    destination_ip: Mapped[Optional[str]] = mapped_column(INET)
     destination_port: Mapped[Optional[int]] = mapped_column(Integer)
     protocol: Mapped[Optional[str]] = mapped_column(String(20))
 
