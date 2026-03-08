@@ -21,11 +21,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import os
 import psutil
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from shared.database import DatabaseManager, get_database_manager
+from shared.database import DatabaseManager, close_database, get_database_manager, init_database
 from shared.utils import Config, get_logger
 
 logger = get_logger(__name__)
@@ -35,20 +36,20 @@ db_manager: DatabaseManager = None
 
 # Service registry - all services to monitor
 SERVICE_REGISTRY = {
-    "alert_ingestor": {"url": "http://localhost:8000", "health_path": "/health"},
-    "alert_normalizer": {"url": "http://localhost:8000/normalizer", "health_path": "/health"},
-    "context_collector": {"url": "http://localhost:8000/context", "health_path": "/health"},
-    "threat_intel": {"url": "http://localhost:8000/threat", "health_path": "/health"},
-    "llm_router": {"url": "http://localhost:8001", "health_path": "/health"},
-    "ai_triage": {"url": "http://localhost:8002", "health_path": "/health"},
-    "similarity_search": {"url": "http://localhost:8003", "health_path": "/health"},
-    "workflow_engine": {"url": "http://localhost:8004", "health_path": "/health"},
-    "automation_orchestrator": {"url": "http://localhost:8005", "health_path": "/health"},
-    "data_analytics": {"url": "http://localhost:8006", "health_path": "/health"},
-    "reporting_service": {"url": "http://localhost:8007", "health_path": "/health"},
-    "notification_service": {"url": "http://localhost:8008", "health_path": "/health"},
-    "configuration_service": {"url": "http://localhost:8009", "health_path": "/health"},
-    "web_dashboard": {"url": "http://localhost:8010", "health_path": "/health"},
+    "alert_ingestor": {"url": os.getenv("ALERT_INGESTOR_URL", "http://alert-ingestor:8000"), "health_path": "/health"},
+    "alert_normalizer": {"url": os.getenv("ALERT_NORMALIZER_URL", "http://alert-normalizer:8000"), "health_path": "/health"},
+    "context_collector": {"url": os.getenv("CONTEXT_COLLECTOR_URL", "http://context-collector:8000"), "health_path": "/health"},
+    "threat_intel": {"url": os.getenv("THREAT_INTEL_URL", "http://threat-intel-aggregator:8000"), "health_path": "/health"},
+    "llm_router": {"url": os.getenv("LLM_ROUTER_URL", "http://llm-router:8000"), "health_path": "/health"},
+    "ai_triage": {"url": os.getenv("AI_TRIAGE_URL", "http://ai-triage-agent:8000"), "health_path": "/health"},
+    "similarity_search": {"url": os.getenv("SIMILARITY_SEARCH_URL", "http://similarity-search:8000"), "health_path": "/health"},
+    "workflow_engine": {"url": os.getenv("WORKFLOW_ENGINE_URL", "http://workflow-engine:8000"), "health_path": "/health"},
+    "automation_orchestrator": {"url": os.getenv("AUTOMATION_ORCH_URL", "http://automation-orchestrator:8000"), "health_path": "/health"},
+    "data_analytics": {"url": os.getenv("DATA_ANALYTICS_URL", "http://data-analytics:8000"), "health_path": "/health"},
+    "reporting_service": {"url": os.getenv("REPORTING_SERVICE_URL", "http://reporting-service:8000"), "health_path": "/health"},
+    "notification_service": {"url": os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8000"), "health_path": "/health"},
+    "configuration_service": {"url": os.getenv("CONFIG_SERVICE_URL", "http://configuration-service:8000"), "health_path": "/health"},
+    "web_dashboard": {"url": os.getenv("WEB_DASHBOARD_URL", "http://web-dashboard:8000"), "health_path": "/health"},
 }
 
 # Metrics storage
@@ -70,8 +71,13 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Monitoring & Metrics service...")
 
     # Initialize database
+    await init_database(
+        database_url=config.database_url,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        echo=config.debug,
+    )
     db_manager = get_database_manager()
-    await db_manager.initialize()
 
     # Start background tasks
     asyncio.create_task(collect_system_metrics())
@@ -82,7 +88,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    await db_manager.close()
+    await close_database()
     logger.info("Monitoring & Metrics service stopped")
 
 
@@ -388,4 +394,4 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=config.host, port=8011)
+    uvicorn.run(app, host=config.host, port=config.port)

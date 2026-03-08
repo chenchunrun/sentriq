@@ -34,8 +34,8 @@ from pydantic import BaseModel, Field
 from shared.database import close_database, get_database_manager, init_database
 from shared.utils import Config, get_logger
 
-from .attack_patterns import AttackPattern, AttackPatternAnalyzer, PatternIndicator
-from .mitre_mapper import (
+from attack_patterns import AttackPattern, AttackPatternAnalyzer, PatternIndicator
+from mitre_mapper import (
     AttackPhase,
     MitreMapper,
     MitreTactic,

@@ -44,6 +44,7 @@ from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from shared.utils.time import utc_now, utc_now_iso
 
 # Environment setup
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test_db")
@@ -129,7 +130,7 @@ def sample_alert():
 
     return SecurityAlert(
         alert_id="ALT-TEST-001",
-        timestamp=datetime.utcnow(),
+        timestamp=utc_now(),
         alert_type=AlertType.MALWARE,
         severity=Severity.HIGH,
         description="Test malware alert",
@@ -179,7 +180,7 @@ def sample_workflow_execution():
         workflow_id="alert-processing",
         status=WorkflowStatus.RUNNING,
         input={"alert_id": "ALT-001"},
-        started_at=datetime.utcnow(),
+        started_at=utc_now(),
     )
 
 
@@ -221,7 +222,7 @@ def generate_alert_data():
     def _generate(alert_id: str = None, severity: str = "medium", alert_type: str = "malware"):
         return {
             "alert_id": alert_id or f"ALT-{uuid.uuid4()}",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now_iso(),
             "alert_type": alert_type,
             "severity": severity,
             "description": f"Test {alert_type} alert",
@@ -237,7 +238,7 @@ def valid_alert_data():
     """Valid alert data for testing."""
     return {
         "alert_id": f"ALT-{uuid.uuid4()}",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now_iso(),
         "alert_type": "malware",
         "severity": "high",
         "description": "Test malware alert",
@@ -255,6 +256,19 @@ def mock_publisher():
     publisher = AsyncMock()
     publisher.publish = AsyncMock()
     return publisher
+
+
+@pytest.fixture
+def test_env():
+    """
+    Lightweight environment fixture for e2e placeholders.
+
+    By default this suite does not require full external infrastructure
+    unless RUN_E2E_TESTS=true is explicitly set.
+    """
+    if os.getenv("RUN_E2E_TESTS", "false").lower() != "true":
+        pytest.skip("E2E infra not enabled (set RUN_E2E_TESTS=true to run)")
+    return {"e2e_enabled": True}
 
 
 # Cleanup fixtures

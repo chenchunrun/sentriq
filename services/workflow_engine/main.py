@@ -18,12 +18,14 @@ import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from shared.database import DatabaseManager, get_database_manager
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+from shared.database import DatabaseManager, close_database, get_database_manager, init_database
 from shared.errors import WorkflowError
 from shared.messaging import MessageConsumer, MessagePublisher
 from shared.models import (
@@ -37,6 +39,22 @@ from shared.models import (
     WorkflowStatus,
 )
 from shared.utils import Config, get_logger
+from shared.utils.time import utc_now, utc_now_iso
+
+temporal_import_error = None
+try:
+    from temporalio.client import Client as TemporalClient
+    from temporalio.worker import Worker as TemporalWorker
+    try:
+        from .temporal_workflows import SecurityWorkflow, execute_step_activity
+    except ImportError:
+        from temporal_workflows import SecurityWorkflow, execute_step_activity
+except Exception as exc:  # pragma: no cover - optional dependency path
+    TemporalClient = None
+    TemporalWorker = None
+    SecurityWorkflow = None
+    execute_step_activity = None
+    temporal_import_error = exc
 
 logger = get_logger(__name__)
 config = Config()
@@ -44,6 +62,8 @@ config = Config()
 db_manager: DatabaseManager = None
 publisher: MessagePublisher = None
 consumer: MessageConsumer = None
+temporal_client = None
+temporal_worker = None
 
 # In-memory workflow execution storage (use database in production)
 active_executions: Dict[str, WorkflowExecution] = {}
@@ -100,16 +120,176 @@ DEFAULT_WORKFLOWS = {
 }
 
 
+class WorkflowExecuteRequest(BaseModel):
+    workflow_id: str
+    input_data: Dict[str, Any] = Field(default_factory=dict)
+
+
+async def seed_default_workflows():
+    """Persist default workflows into database if missing."""
+    async with db_manager.get_session() as session:
+        for wf in DEFAULT_WORKFLOWS.values():
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO workflows (workflow_id, name, description, category, trigger_type,
+                                           trigger_conditions, status, priority, steps, created_by)
+                    VALUES (:workflow_id, :name, :description, :category, :trigger_type,
+                            CAST(:trigger_conditions AS jsonb), :status, :priority, CAST(:steps AS jsonb), :created_by)
+                    ON CONFLICT (workflow_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        category = EXCLUDED.category,
+                        trigger_type = EXCLUDED.trigger_type,
+                        trigger_conditions = EXCLUDED.trigger_conditions,
+                        status = EXCLUDED.status,
+                        priority = EXCLUDED.priority,
+                        steps = EXCLUDED.steps,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "workflow_id": wf.workflow_id,
+                    "name": wf.name,
+                    "description": wf.description,
+                    "category": "incident",
+                    "trigger_type": "manual",
+                    "trigger_conditions": json.dumps({}),
+                    "status": "active",
+                    "priority": "medium",
+                    "steps": json.dumps(wf.steps),
+                    "created_by": "system",
+                },
+            )
+        await session.commit()
+
+
+async def load_workflows_from_db() -> Dict[str, WorkflowDefinition]:
+    """Load workflow definitions from database."""
+    workflows: Dict[str, WorkflowDefinition] = {}
+    async with db_manager.get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT workflow_id, name, description, steps, status
+                FROM workflows
+                WHERE status != 'archived'
+                """
+            )
+        )
+        rows = result.fetchall()
+
+    for row in rows:
+        workflows[row.workflow_id] = WorkflowDefinition(
+            workflow_id=row.workflow_id,
+            name=row.name,
+            description=row.description,
+            version="1.0.0",
+            steps=row.steps or [],
+            timeout_seconds=3600,
+        )
+
+    return workflows
+
+
+async def persist_workflow_execution(execution: WorkflowExecution):
+    """Persist workflow execution state to database."""
+    async with db_manager.get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO workflow_executions (execution_id, workflow_id, trigger_type,
+                                                 trigger_reference, status, started_at,
+                                                 completed_at, duration_seconds, steps_execution,
+                                                 result, error_message, executed_by)
+                VALUES (:execution_id, :workflow_id, :trigger_type, :trigger_reference, :status,
+                        :started_at, :completed_at, :duration_seconds, CAST(:steps_execution AS jsonb),
+                        :result, :error_message, :executed_by)
+                ON CONFLICT (execution_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    completed_at = EXCLUDED.completed_at,
+                    duration_seconds = EXCLUDED.duration_seconds,
+                    steps_execution = EXCLUDED.steps_execution,
+                    result = EXCLUDED.result,
+                    error_message = EXCLUDED.error_message
+                """
+            ),
+            {
+                "execution_id": execution.execution_id,
+                "workflow_id": execution.workflow_id,
+                "trigger_type": "manual",
+                "trigger_reference": execution.input.get("alert_id"),
+                "status": execution.status.value,
+                "started_at": execution.started_at,
+                "completed_at": execution.completed_at,
+                "duration_seconds": None,
+                "steps_execution": json.dumps(
+                    {"current_step": execution.current_step, "progress": execution.progress}
+                ),
+                "result": json.dumps(execution.output) if execution.output else None,
+                "error_message": execution.error,
+                "executed_by": "system",
+            },
+        )
+        await session.commit()
+
+
+async def persist_human_task(task: HumanTask):
+    """Persist human task to database."""
+    async with db_manager.get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO human_tasks (task_id, execution_id, task_type, title, description,
+                                         assigned_to, status, priority, due_date,
+                                         input_data, output_data, notes)
+                VALUES (:task_id, :execution_id, :task_type, :title, :description,
+                        :assigned_to, :status, :priority, :due_date,
+                        CAST(:input_data AS jsonb), CAST(:output_data AS jsonb), :notes)
+                ON CONFLICT (task_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    output_data = EXCLUDED.output_data,
+                    notes = EXCLUDED.notes,
+                    completed_at = CASE
+                        WHEN EXCLUDED.status = 'completed' THEN NOW()
+                        ELSE human_tasks.completed_at
+                    END
+                """
+            ),
+            {
+                "task_id": task.task_id,
+                "execution_id": task.execution_id,
+                "task_type": task.task_type,
+                "title": task.title,
+                "description": task.description,
+                "assigned_to": task.assigned_to,
+                "status": task.status.value,
+                "priority": task.priority.value,
+                "due_date": task.due_date,
+                "input_data": json.dumps(task.input_data or {}),
+                "output_data": json.dumps(task.output_data or {}),
+                "notes": task.notes,
+            },
+        )
+        await session.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
-    global db_manager, publisher, consumer, workflow_definitions
+    global db_manager, publisher, consumer, workflow_definitions, temporal_client, temporal_worker
 
     logger.info("Starting Workflow Engine service...")
 
     # Initialize database
+    import os
+    await init_database(
+        database_url=config.database_url,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        echo=config.debug,
+    )
     db_manager = get_database_manager()
-    await db_manager.initialize()
 
     # Initialize messaging
     publisher = MessagePublisher(config.rabbitmq_url)
@@ -119,7 +299,33 @@ async def lifespan(app: FastAPI):
     await consumer.connect()
 
     # Load workflow definitions
-    workflow_definitions.update(DEFAULT_WORKFLOWS)
+    await seed_default_workflows()
+    workflow_definitions.update(await load_workflows_from_db())
+
+    if config.temporal_enabled and TemporalClient and TemporalWorker:
+        try:
+            temporal_client = await TemporalClient.connect(
+                config.temporal_server_url,
+                namespace=config.temporal_namespace,
+            )
+            temporal_worker = TemporalWorker(
+                temporal_client,
+                task_queue=config.temporal_task_queue,
+                workflows=[SecurityWorkflow],
+                activities=[execute_step_activity],
+            )
+            asyncio.create_task(temporal_worker.run())
+            logger.info(
+                f"Temporal worker connected (server={config.temporal_server_url}, task_queue={config.temporal_task_queue})"
+            )
+        except Exception as e:
+            temporal_client = None
+            temporal_worker = None
+            logger.warning(f"Temporal unavailable, falling back to local execution: {e}")
+    elif config.temporal_enabled:
+        logger.warning(f"Temporal enabled but client unavailable: {temporal_import_error}")
+    else:
+        logger.info("Temporal execution disabled; using local workflow executor")
 
     # Start consuming workflow triggers
     asyncio.create_task(consume_workflow_triggers())
@@ -134,7 +340,7 @@ async def lifespan(app: FastAPI):
     # Cleanup
     await consumer.close()
     await publisher.close()
-    await db_manager.close()
+    await close_database()
     logger.info("Workflow Engine service stopped")
 
 
@@ -185,7 +391,7 @@ async def execute_workflow_step(
                             "step": step_name,
                             "input": execution.input,
                         },
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": utc_now_iso(),
                     },
                 )
                 return {"status": "completed", "output": {}}
@@ -204,8 +410,29 @@ async def execute_workflow_step(
                 input_data=execution.input.copy(),
             )
 
-            # TODO: Save task to database
-            # TODO: Send notification to assignee
+            await persist_human_task(task)
+
+            # Notify assignee via notification service
+            await publisher.publish(
+                "notifications.send",
+                {
+                    "message_id": str(uuid.uuid4()),
+                    "message_type": "notification.request",
+                    "payload": {
+                        "channel": "in_app",
+                        "recipient": task.assigned_to or "security-team",
+                        "subject": task.title,
+                        "message": task.description,
+                        "priority": task.priority.value,
+                        "data": {
+                            "task_id": task.task_id,
+                            "execution_id": task.execution_id,
+                            "task_type": task.task_type,
+                        },
+                    },
+                    "timestamp": utc_now_iso(),
+                },
+            )
 
             return {
                 "status": "pending",
@@ -231,7 +458,7 @@ async def execute_workflow_step(
         return {"status": "failed", "error": str(e)}
 
 
-async def execute_workflow(execution: WorkflowExecution):
+async def execute_workflow(execution: WorkflowExecution, start_index: int = 0):
     """
     Execute workflow steps sequentially.
 
@@ -247,7 +474,7 @@ async def execute_workflow(execution: WorkflowExecution):
         active_executions[execution.execution_id] = execution
 
         # Execute each step
-        for i, step in enumerate(workflow_def.steps):
+        for i, step in enumerate(workflow_def.steps[start_index:], start=start_index):
             execution.current_step = step.get("name")
             execution.progress = i / len(workflow_def.steps)
 
@@ -256,19 +483,19 @@ async def execute_workflow(execution: WorkflowExecution):
             if result.get("status") == "failed":
                 execution.status = WorkflowStatus.FAILED
                 execution.error = result.get("error", "Step execution failed")
-                execution.completed_at = datetime.utcnow()
+                execution.completed_at = utc_now()
                 break
 
             elif result.get("status") == "pending":
                 # Waiting for human task or external action
                 execution.status = WorkflowStatus.PENDING
-                # TODO: Resume when task is completed
+                await persist_workflow_execution(execution)
                 break
 
         # If all steps completed
         if execution.status == WorkflowStatus.RUNNING:
             execution.status = WorkflowStatus.COMPLETED
-            execution.completed_at = datetime.utcnow()
+            execution.completed_at = utc_now()
             execution.progress = 1.0
             execution.output = {"message": "Workflow completed successfully"}
 
@@ -279,9 +506,11 @@ async def execute_workflow(execution: WorkflowExecution):
                 "message_id": str(uuid.uuid4()),
                 "message_type": "workflow.completed",
                 "payload": execution.model_dump(),
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_iso(),
             },
         )
+
+        await persist_workflow_execution(execution)
 
         logger.info(
             f"Workflow execution {execution.execution_id} completed: {execution.status.value}"
@@ -291,7 +520,8 @@ async def execute_workflow(execution: WorkflowExecution):
         logger.error(f"Workflow execution failed: {e}", exc_info=True)
         execution.status = WorkflowStatus.FAILED
         execution.error = str(e)
-        execution.completed_at = datetime.utcnow()
+        execution.completed_at = utc_now()
+        await persist_workflow_execution(execution)
 
 
 async def consume_workflow_triggers():
@@ -308,7 +538,7 @@ async def consume_workflow_triggers():
                 return
 
             # Start workflow execution
-            execution = start_workflow_execution(workflow_id, input_data)
+            execution = await start_workflow_execution(workflow_id, input_data)
             logger.info(f"Started workflow execution {execution.execution_id}")
 
         except Exception as e:
@@ -317,7 +547,47 @@ async def consume_workflow_triggers():
     await consumer.consume(process_message)
 
 
-def start_workflow_execution(workflow_id: str, input_data: Dict[str, Any]) -> WorkflowExecution:
+async def start_temporal_execution(execution: WorkflowExecution, workflow_def: WorkflowDefinition) -> None:
+    """Start execution via Temporal and mirror initial state to the database."""
+    handle = await temporal_client.start_workflow(
+        SecurityWorkflow.run,
+        args=[workflow_def.workflow_id, execution.execution_id, workflow_def.steps, input_data_for_temporal(execution)],
+        id=execution.execution_id,
+        task_queue=config.temporal_task_queue,
+    )
+    execution.status = WorkflowStatus.RUNNING
+    execution.output = {"temporal_run_id": handle.first_execution_run_id}
+    active_executions[execution.execution_id] = execution
+    await persist_workflow_execution(execution)
+    asyncio.create_task(track_temporal_execution(handle, execution.execution_id))
+
+
+def input_data_for_temporal(execution: WorkflowExecution) -> Dict[str, Any]:
+    """Return workflow input payload for Temporal execution."""
+    return execution.input.copy() if execution.input else {}
+
+
+async def track_temporal_execution(handle, execution_id: str) -> None:
+    """Track Temporal workflow completion and mirror final state locally."""
+    execution = active_executions.get(execution_id)
+    if not execution:
+        return
+
+    try:
+        result = await handle.result()
+        execution.status = WorkflowStatus.COMPLETED
+        execution.completed_at = utc_now()
+        execution.progress = 1.0
+        execution.output = result
+    except Exception as e:
+        execution.status = WorkflowStatus.FAILED
+        execution.completed_at = utc_now()
+        execution.error = str(e)
+    finally:
+        await persist_workflow_execution(execution)
+
+
+async def start_workflow_execution(workflow_id: str, input_data: Dict[str, Any]) -> WorkflowExecution:
     """
     Start a new workflow execution.
 
@@ -333,11 +603,18 @@ def start_workflow_execution(workflow_id: str, input_data: Dict[str, Any]) -> Wo
         workflow_id=workflow_id,
         status=WorkflowStatus.PENDING,
         input=input_data,
-        started_at=datetime.utcnow(),
+        started_at=utc_now(),
     )
 
-    # Start execution in background
-    asyncio.create_task(execute_workflow(execution))
+    workflow_def = workflow_definitions.get(workflow_id)
+    if not workflow_def:
+        raise WorkflowError(f"Workflow definition not found: {workflow_id}")
+
+    if temporal_client and SecurityWorkflow:
+        await start_temporal_execution(execution, workflow_def)
+    else:
+        asyncio.create_task(execute_workflow(execution))
+        asyncio.create_task(persist_workflow_execution(execution))
 
     return execution
 
@@ -348,7 +625,7 @@ async def monitor_executions():
         try:
             await asyncio.sleep(60)  # Check every minute
 
-            current_time = datetime.utcnow()
+            current_time = utc_now()
             timed_out = []
 
             for exec_id, execution in active_executions.items():
@@ -358,7 +635,11 @@ async def monitor_executions():
                     continue
 
                 timeout = timedelta(seconds=workflow_def.timeout_seconds)
-                if current_time - execution.started_at > timeout:
+                started_at = execution.started_at
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=UTC)
+
+                if current_time - started_at > timeout:
                     execution.status = WorkflowStatus.TIMED_OUT
                     execution.error = "Workflow execution timed out"
                     execution.completed_at = current_time
@@ -374,6 +655,53 @@ async def monitor_executions():
             logger.error(f"Error monitoring executions: {e}", exc_info=True)
 
 
+async def fetch_executions_from_db(
+    status: Optional[WorkflowStatus] = None, workflow_id: Optional[str] = None
+) -> List[WorkflowExecution]:
+    """Fetch workflow executions from database."""
+    conditions = []
+    params: Dict[str, Any] = {}
+
+    if status:
+        conditions.append("status = :status")
+        params["status"] = status.value
+    if workflow_id:
+        conditions.append("workflow_id = :workflow_id")
+        params["workflow_id"] = workflow_id
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    async with db_manager.get_session() as session:
+        result = await session.execute(
+            text(
+                f"""
+                SELECT execution_id, workflow_id, status, started_at, completed_at
+                FROM workflow_executions
+                {where_clause}
+                ORDER BY started_at DESC
+                LIMIT 200
+                """
+            ),
+            params,
+        )
+        rows = result.fetchall()
+
+    executions: List[WorkflowExecution] = []
+    for row in rows:
+        executions.append(
+            WorkflowExecution(
+                execution_id=row.execution_id,
+                workflow_id=row.workflow_id,
+                status=WorkflowStatus(row.status),
+                input={},
+                started_at=row.started_at,
+                completed_at=row.completed_at,
+            )
+        )
+
+    return executions
+
+
 # API Endpoints
 
 
@@ -382,13 +710,45 @@ async def create_workflow_definition(definition: WorkflowDefinition):
     """Create a new workflow definition."""
     try:
         workflow_definitions[definition.workflow_id] = definition
-
-        # TODO: Save to database
+        async with db_manager.get_session() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO workflows (workflow_id, name, description, category, trigger_type,
+                                           trigger_conditions, status, priority, steps, created_by)
+                    VALUES (:workflow_id, :name, :description, :category, :trigger_type,
+                            CAST(:trigger_conditions AS jsonb), :status, :priority, CAST(:steps AS jsonb), :created_by)
+                    ON CONFLICT (workflow_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        category = EXCLUDED.category,
+                        trigger_type = EXCLUDED.trigger_type,
+                        trigger_conditions = EXCLUDED.trigger_conditions,
+                        status = EXCLUDED.status,
+                        priority = EXCLUDED.priority,
+                        steps = EXCLUDED.steps,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "workflow_id": definition.workflow_id,
+                    "name": definition.name,
+                    "description": definition.description,
+                    "category": "custom",
+                    "trigger_type": "manual",
+                    "trigger_conditions": json.dumps({}),
+                    "status": "active",
+                    "priority": "medium",
+                    "steps": json.dumps(definition.steps),
+                    "created_by": "api",
+                },
+            )
+            await session.commit()
 
         return {
             "success": True,
             "data": definition.model_dump(),
-            "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+            "meta": {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())},
         }
 
     except Exception as e:
@@ -407,7 +767,7 @@ async def list_workflow_definitions():
             "workflows": [wf.model_dump() for wf in workflow_definitions.values()],
             "total": len(workflow_definitions),
         },
-        "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+        "meta": {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())},
     }
 
 
@@ -421,13 +781,13 @@ async def get_workflow_definition(workflow_id: str):
     return {
         "success": True,
         "data": workflow.model_dump(),
-        "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+        "meta": {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())},
     }
 
 
 @app.post("/api/v1/workflows/execute", response_model=Dict[str, Any])
 async def execute_workflow_api(
-    workflow_id: str, input_data: Dict[str, Any], background_tasks: BackgroundTasks
+    request: WorkflowExecuteRequest, background_tasks: BackgroundTasks
 ):
     """
     Start workflow execution via API.
@@ -438,13 +798,13 @@ async def execute_workflow_api(
     """
     try:
         # Check if workflow exists
-        if workflow_id not in workflow_definitions:
+        if request.workflow_id not in workflow_definitions:
             raise HTTPException(
-                status_code=404, detail=f"Workflow definition not found: {workflow_id}"
+                status_code=404, detail=f"Workflow definition not found: {request.workflow_id}"
             )
 
         # Start execution
-        execution = start_workflow_execution(workflow_id, input_data)
+        execution = await start_workflow_execution(request.workflow_id, request.input_data)
 
         return {
             "success": True,
@@ -454,7 +814,7 @@ async def execute_workflow_api(
                 "status": execution.status.value,
                 "started_at": execution.started_at.isoformat(),
             },
-            "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+            "meta": {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())},
         }
 
     except HTTPException:
@@ -470,17 +830,18 @@ async def list_executions(
 ):
     """List workflow executions, optionally filtered by status or workflow."""
     executions = list(active_executions.values())
-
-    if status:
-        executions = [e for e in executions if e.status == status]
-
-    if workflow_id:
-        executions = [e for e in executions if e.workflow_id == workflow_id]
+    if not executions:
+        executions = await fetch_executions_from_db(status, workflow_id)
+    else:
+        if status:
+            executions = [e for e in executions if e.status == status]
+        if workflow_id:
+            executions = [e for e in executions if e.workflow_id == workflow_id]
 
     return {
         "success": True,
         "data": {"executions": [e.model_dump() for e in executions], "total": len(executions)},
-        "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+        "meta": {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())},
     }
 
 
@@ -489,12 +850,92 @@ async def get_execution(execution_id: str):
     """Get a specific workflow execution."""
     execution = active_executions.get(execution_id)
     if not execution:
-        raise HTTPException(status_code=404, detail=f"Execution not found: {execution_id}")
+        async with db_manager.get_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT execution_id, workflow_id, status, started_at, completed_at
+                    FROM workflow_executions
+                    WHERE execution_id = :execution_id
+                    """
+                ),
+                {"execution_id": execution_id},
+            )
+            row = result.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Execution not found: {execution_id}")
+
+        execution = WorkflowExecution(
+            execution_id=row.execution_id,
+            workflow_id=row.workflow_id,
+            status=WorkflowStatus(row.status),
+            input={},
+            started_at=row.started_at,
+            completed_at=row.completed_at,
+        )
 
     return {
         "success": True,
         "data": execution.model_dump(),
-        "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+        "meta": {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())},
+    }
+
+
+@app.post("/api/v1/workflows/tasks/{task_id}/complete", response_model=Dict[str, Any])
+async def complete_human_task(task_id: str, output_data: Dict[str, Any] = None, notes: str = None):
+    """Complete a human task and resume workflow execution."""
+    async with db_manager.get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT task_id, execution_id
+                FROM human_tasks
+                WHERE task_id = :task_id
+                """
+            ),
+            {"task_id": task_id},
+        )
+        row = result.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+
+    task = HumanTask(
+        task_id=row.task_id,
+        execution_id=row.execution_id,
+        task_type="manual_review",
+        title="completed",
+        description="completed",
+        assigned_to=None,
+        status=TaskStatus.COMPLETED,
+        priority=TaskPriority.MEDIUM,
+        input_data={},
+        output_data=output_data or {},
+        notes=notes,
+    )
+    await persist_human_task(task)
+
+    # Resume execution from next step
+    execution = active_executions.get(row.execution_id)
+    if execution:
+        workflow_def = workflow_definitions.get(execution.workflow_id)
+        if workflow_def:
+            try:
+                current_index = next(
+                    i
+                    for i, s in enumerate(workflow_def.steps)
+                    if s.get("name") == execution.current_step
+                )
+            except StopIteration:
+                current_index = -1
+
+            execution.status = WorkflowStatus.RUNNING
+            asyncio.create_task(execute_workflow(execution, start_index=current_index + 1))
+
+    return {
+        "success": True,
+        "message": "Task completed and workflow resumed",
+        "meta": {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())},
     }
 
 
@@ -511,12 +952,12 @@ async def cancel_execution(execution_id: str):
         )
 
     execution.status = WorkflowStatus.CANCELLED
-    execution.completed_at = datetime.utcnow()
+    execution.completed_at = utc_now()
 
     return {
         "success": True,
         "message": "Execution cancelled",
-        "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+        "meta": {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())},
     }
 
 
@@ -526,7 +967,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "workflow-engine",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now_iso(),
         "workflows": {
             "definitions": len(workflow_definitions),
             "active_executions": len(active_executions),

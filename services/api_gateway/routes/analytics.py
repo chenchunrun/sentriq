@@ -19,8 +19,8 @@ Provides REST endpoints for dashboard statistics, trends,
 metrics, and analytical data.
 """
 
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from datetime import timedelta
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +41,9 @@ from models.responses import (
     TrendDataPoint,
     TrendResponse,
 )
+from routes.auth import require_permissions
+from shared.utils.time import utc_now
+
 router = APIRouter()
 
 
@@ -68,6 +71,7 @@ async def get_db_session() -> AsyncSession:
 async def get_dashboard_stats(
     time_range: str = Query("24h", pattern="^(1h|24h|7d|30d)$", description="Time range"),
     include_trends: bool = Query(True, description="Include trend data"),
+    current_user=Depends(require_permissions("analytics:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -80,7 +84,7 @@ async def get_dashboard_stats(
     triage_repo = TriageRepository(session)
 
     # Calculate time range
-    now = datetime.utcnow()
+    now = utc_now()
     if time_range == "1h":
         start_time = now - timedelta(hours=1)
     elif time_range == "24h":
@@ -111,7 +115,7 @@ async def get_dashboard_stats(
     # High risk alerts (risk score >= 70)
     high_risk_alerts = len([
         a for a in alerts
-        if a.risk_score and a.risk_score >= 70
+        if getattr(a, "risk_score", None) is not None and getattr(a, "risk_score", 0) >= 70
     ])
 
     # Pending triage (not reviewed or requires review)
@@ -176,6 +180,7 @@ async def get_dashboard_stats(
 async def get_alert_trends(
     time_range: str = Query("24h", pattern="^(1h|24h|7d|30d)$", description="Time range"),
     group_by: str = Query("hour", pattern="^(hour|day)$", description="Group by period"),
+    current_user=Depends(require_permissions("analytics:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -187,7 +192,7 @@ async def get_alert_trends(
     alert_repo = AlertRepository(session)
 
     # Calculate time range
-    now = datetime.utcnow()
+    now = utc_now()
     if time_range == "1h":
         start_time = now - timedelta(hours=1)
     elif time_range == "24h":
@@ -242,6 +247,7 @@ async def get_alert_trends(
 async def get_risk_score_trends(
     time_range: str = Query("24h", pattern="^(1h|24h|7d|30d)$", description="Time range"),
     group_by: str = Query("hour", pattern="^(hour|day)$", description="Group by period"),
+    current_user=Depends(require_permissions("analytics:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -253,7 +259,7 @@ async def get_risk_score_trends(
     alert_repo = AlertRepository(session)
 
     # Calculate time range
-    now = datetime.utcnow()
+    now = utc_now()
     if time_range == "1h":
         start_time = now - timedelta(hours=1)
     elif time_range == "24h":
@@ -309,6 +315,7 @@ async def get_risk_score_trends(
     description="Retrieve alert count by severity level",
 )
 async def get_severity_distribution(
+    current_user=Depends(require_permissions("analytics:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -340,6 +347,7 @@ async def get_severity_distribution(
     description="Retrieve alert count by status",
 )
 async def get_status_distribution(
+    current_user=Depends(require_permissions("analytics:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -372,6 +380,7 @@ async def get_status_distribution(
 )
 async def get_top_sources(
     limit: int = Query(10, ge=1, le=100, description="Max results"),
+    current_user=Depends(require_permissions("analytics:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -400,6 +409,7 @@ async def get_top_sources(
 )
 async def get_top_alert_types(
     limit: int = Query(10, ge=1, le=100, description="Max results"),
+    current_user=Depends(require_permissions("analytics:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -435,6 +445,7 @@ async def get_top_alert_types(
     description="Retrieve system performance metrics",
 )
 async def get_performance_metrics(
+    current_user=Depends(require_permissions("analytics:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -481,7 +492,7 @@ async def _calculate_trends(
     """Calculate trend data for dashboard."""
     from typing import Any
 
-    now = datetime.utcnow()
+    now = utc_now()
     if time_range == "1h":
         start_time = now - timedelta(hours=1)
         hours = 1
@@ -579,7 +590,7 @@ def _group_risk_scores_by_time(
         return [
             TrendDataPoint(
                 timestamp=hour_key,
-                timestamp=sum(risk_scores) / len(risk_scores) if risk_scores else 0.0,
+                value=sum(risk_scores) / len(risk_scores) if risk_scores else 0.0,
                 label=hour_key.strftime("%Y-%m-%d %H:00"),
             )
             for hour_key, risk_scores in sorted(groups.items())

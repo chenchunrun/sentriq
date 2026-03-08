@@ -26,11 +26,12 @@ from shared.database.models import Alert
 from shared.database.repositories.base import BaseRepository
 from shared.models.alert import AlertFilter, AlertStatus, AlertType, Severity
 from shared.utils.logger import get_logger
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select
 
 logger = get_logger(__name__)
+ALERT_TIME_FIELD = Alert.received_at
 
 
 class AlertRepository(BaseRepository[Alert]):
@@ -96,7 +97,7 @@ class AlertRepository(BaseRepository[Alert]):
         filters: AlertFilter,
         skip: int = 0,
         limit: int = 100,
-        sort_by: str = "timestamp",
+        sort_by: str = "received_at",
         sort_order: str = "desc",
     ) -> tuple[List[Alert], int]:
         """
@@ -147,10 +148,10 @@ class AlertRepository(BaseRepository[Alert]):
             conditions.append(Alert.source == filters.source)
 
         if filters.start_date:
-            conditions.append(Alert.timestamp >= filters.start_date)
+            conditions.append(ALERT_TIME_FIELD >= filters.start_date)
 
         if filters.end_date:
-            conditions.append(Alert.timestamp <= filters.end_date)
+            conditions.append(ALERT_TIME_FIELD <= filters.end_date)
 
         if filters.search:
             # Text search in description and title
@@ -172,7 +173,7 @@ class AlertRepository(BaseRepository[Alert]):
         total = count_result.scalar()
 
         # Apply sorting
-        sort_column = getattr(Alert, sort_by, Alert.timestamp)
+        sort_column = getattr(Alert, sort_by, ALERT_TIME_FIELD)
         if sort_order.lower() == "asc":
             query = query.order_by(sort_column.asc())
         else:
@@ -200,7 +201,7 @@ class AlertRepository(BaseRepository[Alert]):
     async def update_alert_status(
         self,
         alert_id: str,
-        status: AlertStatus,
+        status: AlertStatus | str,
         assigned_to: Optional[str] = None,
         comment: Optional[str] = None,
     ) -> Optional[Alert]:
@@ -221,7 +222,7 @@ class AlertRepository(BaseRepository[Alert]):
             logger.warning(f"Alert not found: {alert_id}")
             return None
 
-        alert.status = status.value
+        alert.status = status.value if isinstance(status, AlertStatus) else str(status)
         if assigned_to:
             alert.assigned_to = assigned_to
 
@@ -232,7 +233,7 @@ class AlertRepository(BaseRepository[Alert]):
             "Alert status updated",
             extra={
                 "alert_id": alert_id,
-                "status": status.value,
+                "status": status.value if isinstance(status, AlertStatus) else str(status),
                 "assigned_to": assigned_to,
             },
         )
@@ -302,7 +303,7 @@ class AlertRepository(BaseRepository[Alert]):
         result = await self.session.execute(
             select(Alert)
             .where(Alert.asset_id == asset_id)
-            .order_by(Alert.timestamp.desc())
+            .order_by(ALERT_TIME_FIELD.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -328,7 +329,7 @@ class AlertRepository(BaseRepository[Alert]):
         result = await self.session.execute(
             select(Alert)
             .where(Alert.user_id == user_id)
-            .order_by(Alert.timestamp.desc())
+            .order_by(ALERT_TIME_FIELD.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -354,7 +355,7 @@ class AlertRepository(BaseRepository[Alert]):
         result = await self.session.execute(
             select(Alert)
             .where(Alert.source_ip == source_ip)
-            .order_by(Alert.timestamp.desc())
+            .order_by(ALERT_TIME_FIELD.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -383,11 +384,11 @@ class AlertRepository(BaseRepository[Alert]):
             select(Alert)
             .where(
                 and_(
-                    Alert.timestamp >= start_date,
-                    Alert.timestamp <= end_date,
+                    ALERT_TIME_FIELD >= start_date,
+                    ALERT_TIME_FIELD <= end_date,
                 )
             )
-            .order_by(Alert.timestamp.desc())
+            .order_by(ALERT_TIME_FIELD.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -420,7 +421,7 @@ class AlertRepository(BaseRepository[Alert]):
                     Alert.severity == severity.value,
                 )
             )
-            .order_by(Alert.timestamp.desc())
+            .order_by(ALERT_TIME_FIELD.desc())
             .offset(skip)
             .limit(limit)
         )
@@ -446,7 +447,7 @@ class AlertRepository(BaseRepository[Alert]):
             .where(
                 Alert.status.notin_([AlertStatus.RESOLVED.value, AlertStatus.CLOSED.value])
             )
-            .order_by(Alert.timestamp.desc())
+            .order_by(ALERT_TIME_FIELD.desc())
             .offset(skip)
             .limit(limit)
         )

@@ -21,7 +21,7 @@ type ConfigCategory = 'alerts' | 'automation' | 'notifications' | 'llm' | 'prefe
 
 interface ConfigItem {
   key: string
-  value: string | number | boolean
+  value: string | number | boolean | string[] | Record<string, unknown>
   description: string
   category: string
   editable: boolean
@@ -73,7 +73,10 @@ export const Settings: React.FC = () => {
     }
   }
 
-  const updateConfig = (key: string, value: string | number | boolean) => {
+  const updateConfig = (
+    key: string,
+    value: string | number | boolean | string[] | Record<string, unknown>
+  ) => {
     setConfigs((prev) => ({
       ...prev,
       [key]: { ...prev[key], value },
@@ -105,7 +108,10 @@ export const Settings: React.FC = () => {
           // It's a preference
           continue
         }
-        await api.config.updateConfig(key, value as string | number | boolean)
+        await api.config.updateConfig(
+          key,
+          value as string | number | boolean | string[] | Record<string, unknown>
+        )
       }
 
       // Save preferences
@@ -132,10 +138,27 @@ export const Settings: React.FC = () => {
       setSaveStatus('idle')
 
       // Call API to reset configs
-      await api.config.resetToDefaults(activeTab)
-
-      // Reload configurations
-      await loadConfigs()
+      if (activeTab === 'preferences') {
+        await api.config.updatePreferences({
+          theme: 'light',
+          notifications: {
+            email: true,
+            browser: true,
+            slack: false,
+          },
+          dashboard: {
+            default_view: 'overview',
+            refresh_interval: 30,
+          },
+          alerts: {
+            default_filters: {},
+          },
+        })
+        await loadPreferences()
+      } else {
+        await api.config.resetToDefaults(activeTab)
+        await loadConfigs()
+      }
 
       // Clear changes
       setChanges({})

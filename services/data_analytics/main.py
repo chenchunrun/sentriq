@@ -14,109 +14,40 @@
 
 """Data Analytics Service - Provides analytics and metrics for security alerts."""
 
-import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from shared.database import DatabaseManager, close_database, get_database_manager, init_database
-from shared.database.repositories.base import BaseRepository
-from shared.messaging import MessageConsumer
-from shared.models import (
-    AlertMetric,
-    AnalyticsQuery,
-    AnalyticsResponse,
-    AutomationMetric,
-    DashboardData,
-    ResponseMeta,
-    SecurityAlert,
-    SuccessResponse,
-    TimeRange,
-    TrendData,
-    TriageMetric,
-    TriageResult,
-)
-from shared.utils import Config, get_logger
+from sqlalchemy import text
+
+from shared.database import DatabaseManager, get_database_manager, init_database, close_database
+from shared.models import AlertMetric, AutomationMetric, DashboardData, TimeRange, TrendData, TriageMetric
+from shared.utils import Config, get_logger, utc_now, utc_now_iso
 
 logger = get_logger(__name__)
 config = Config()
 
 db_manager: DatabaseManager = None
-consumer: MessageConsumer = None
-
-# In-memory metrics cache (use database + time-series DB in production)
-metrics_cache: Dict[str, Any] = {
-    "alerts": {
-        "total": 0,
-        "by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-        "by_type": {},
-        "triaged": 0,
-        "auto_closed": 0,
-        "human_reviewed": 0,
-    },
-    "triage": {
-        "total_triage_time": 0.0,
-        "triage_count": 0,
-        "ai_triaged": 0,
-        "human_triaged": 0,
-        "accurate": 0,
-        "false_positives": 0,
-    },
-    "automation": {
-        "playbooks_executed": 0,
-        "actions_executed": 0,
-        "successful": 0,
-        "total_time": 0.0,
-    },
-}
-
-# Trend data storage
-trends_cache: Dict[str, List[TrendData]] = {
-    "alert_volume": [],
-    "triage_accuracy": [],
-    "automation_rate": [],
-}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
-    global db_manager, consumer
-
+    global db_manager
     logger.info("Starting Data Analytics service...")
-
-    # Initialize database
-    import os
     await init_database(
         database_url=config.database_url,
-        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
-        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        pool_size=config.db_pool_size,
+        max_overflow=config.db_max_overflow,
         echo=config.debug,
     )
     db_manager = get_database_manager()
-
-    # Initialize message consumer (optional, for real-time metrics)
-    try:
-        consumer = MessageConsumer(config.rabbitmq_url, "analytics.events")
-        await consumer.connect()
-        asyncio.create_task(consume_analytics_events())
-    except Exception as e:
-        logger.warning(f"Could not connect to message queue: {e}")
-
-    # Start background task to update trends
-    asyncio.create_task(update_trends_periodically())
-
     logger.info("Data Analytics service started successfully")
-
     yield
-
-    # Cleanup
-    if consumer:
-        await consumer.close()
-    await db_manager.close()
+    await close_database()
     logger.info("Data Analytics service stopped")
 
 
@@ -135,103 +66,15 @@ app.add_middleware(
 )
 
 
-async def consume_analytics_events():
-    """Consume analytics events from message queue."""
-
-    async def process_message(message: dict):
-        try:
-            event_type = message.get("event_type")
-            payload = message.get("payload", {})
-
-            if event_type == "alert_created":
-                metrics_cache["alerts"]["total"] += 1
-                severity = payload.get("severity", "unknown").lower()
-                if severity in metrics_cache["alerts"]["by_severity"]:
-                    metrics_cache["alerts"]["by_severity"][severity] += 1
-
-                alert_type = payload.get("alert_type", "unknown")
-                metrics_cache["alerts"]["by_type"][alert_type] = (
-                    metrics_cache["alerts"]["by_type"].get(alert_type, 0) + 1
-                )
-
-            elif event_type == "alert_triaged":
-                metrics_cache["alerts"]["triaged"] += 1
-
-                triage_time = payload.get("triage_time_seconds", 0)
-                metrics_cache["triage"]["total_triage_time"] += triage_time
-                metrics_cache["triage"]["triage_count"] += 1
-
-                triaged_by = payload.get("triaged_by", "unknown")
-                if triaged_by == "ai-agent":
-                    metrics_cache["triage"]["ai_triaged"] += 1
-                else:
-                    metrics_cache["triage"]["human_triaged"] += 1
-
-            elif event_type == "automation_executed":
-                metrics_cache["automation"]["playbooks_executed"] += 1
-                actions_count = payload.get("actions_count", 0)
-                metrics_cache["automation"]["actions_executed"] += actions_count
-
-                if payload.get("success"):
-                    metrics_cache["automation"]["successful"] += 1
-
-                execution_time = payload.get("execution_time_seconds", 0)
-                metrics_cache["automation"]["total_time"] += execution_time
-
-        except Exception as e:
-            logger.error(f"Failed to process analytics event: {e}", exc_info=True)
-
-    await consumer.consume(process_message)
-
-
-async def update_trends_periodically():
-    """Update trend data periodically."""
-    while True:
-        try:
-            await asyncio.sleep(300)  # Update every 5 minutes
-
-            # Add new data point
-            now = datetime.utcnow()
-
-            # Alert volume trend
-            alert_volume = metrics_cache["alerts"]["total"]
-            trends_cache["alert_volume"].append(
-                TrendData(timestamp=now, value=alert_volume, label=now.strftime("%H:%M"))
-            )
-
-            # Keep only last 24 hours of data
-            cutoff = now - timedelta(hours=24)
-            trends_cache["alert_volume"] = [
-                t for t in trends_cache["alert_volume"] if t.timestamp > cutoff
-            ]
-
-            # Triage accuracy trend
-            if metrics_cache["triage"]["triage_count"] > 0:
-                accuracy = (
-                    metrics_cache["triage"]["accurate"] / metrics_cache["triage"]["triage_count"]
-                )
-                trends_cache["triage_accuracy"].append(
-                    TrendData(
-                        timestamp=now,
-                        value=accuracy * 100,  # Convert to percentage
-                        label=now.strftime("%H:%M"),
-                    )
-                )
-
-                trends_cache["triage_accuracy"] = [
-                    t for t in trends_cache["triage_accuracy"] if t.timestamp > cutoff
-                ]
-
-            logger.debug("Trends updated successfully")
-
-        except Exception as e:
-            logger.error(f"Failed to update trends: {e}", exc_info=True)
+def response_meta(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    meta = {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())}
+    if extra:
+        meta.update(extra)
+    return meta
 
 
 def calculate_time_range(time_range: TimeRange) -> tuple[datetime, datetime]:
-    """Calculate start and end dates for time range."""
-    end_date = datetime.utcnow()
-
+    end_date = utc_now().replace(tzinfo=None)
     if time_range == TimeRange.LAST_HOUR:
         start_date = end_date - timedelta(hours=1)
     elif time_range == TimeRange.LAST_24H:
@@ -240,234 +83,336 @@ def calculate_time_range(time_range: TimeRange) -> tuple[datetime, datetime]:
         start_date = end_date - timedelta(days=7)
     elif time_range == TimeRange.LAST_30D:
         start_date = end_date - timedelta(days=30)
-    else:  # CUSTOM - should be provided in query
+    else:
         start_date = end_date - timedelta(days=1)
-
     return start_date, end_date
 
 
-# API Endpoints
+async def fetch_alert_metrics(start_date: datetime, end_date: datetime) -> AlertMetric:
+    async with db_manager.get_session() as session:
+        total_alerts = await session.scalar(
+            text("SELECT COUNT(*) FROM alerts WHERE received_at BETWEEN :start AND :end"),
+            {"start": start_date, "end": end_date},
+        )
+        sev_result = await session.execute(
+            text(
+                """
+                SELECT severity, COUNT(*) AS count
+                FROM alerts
+                WHERE received_at BETWEEN :start AND :end
+                GROUP BY severity
+                """
+            ),
+            {"start": start_date, "end": end_date},
+        )
+        by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        for row in sev_result.fetchall():
+            by_severity[row.severity] = row.count
+
+        type_result = await session.execute(
+            text(
+                """
+                SELECT alert_type, COUNT(*) AS count
+                FROM alerts
+                WHERE received_at BETWEEN :start AND :end
+                GROUP BY alert_type
+                """
+            ),
+            {"start": start_date, "end": end_date},
+        )
+        by_type = {row.alert_type: row.count for row in type_result.fetchall()}
+
+        status_result = await session.execute(
+            text(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM alerts
+                WHERE received_at BETWEEN :start AND :end
+                GROUP BY status
+                """
+            ),
+            {"start": start_date, "end": end_date},
+        )
+        by_status = {row.status: row.count for row in status_result.fetchall()}
+
+        triaged = await session.scalar(
+            text("SELECT COUNT(*) FROM triage_results WHERE created_at BETWEEN :start AND :end"),
+            {"start": start_date, "end": end_date},
+        )
+        human_reviewed = await session.scalar(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM triage_results
+                WHERE requires_human_review = true
+                  AND created_at BETWEEN :start AND :end
+                """
+            ),
+            {"start": start_date, "end": end_date},
+        )
+        avg_resolution_time = await session.scalar(
+            text(
+                """
+                SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 60.0)
+                FROM alerts
+                WHERE status = 'resolved'
+                  AND updated_at IS NOT NULL
+                  AND created_at IS NOT NULL
+                  AND updated_at >= created_at
+                """
+            )
+        )
+        mtta = await session.scalar(
+            text(
+                """
+                SELECT AVG(EXTRACT(EPOCH FROM (t.first_triage - a.received_at)) / 60.0)
+                FROM alerts a
+                JOIN (
+                    SELECT alert_id, MIN(created_at) AS first_triage
+                    FROM triage_results
+                    GROUP BY alert_id
+                ) t ON t.alert_id = a.alert_id
+                WHERE a.received_at IS NOT NULL
+                  AND t.first_triage IS NOT NULL
+                  AND t.first_triage >= a.received_at
+                """
+            )
+        )
+
+    return AlertMetric(
+        total_alerts=total_alerts or 0,
+        by_severity=by_severity,
+        by_type=by_type,
+        by_status=by_status,
+        triaged=triaged or 0,
+        auto_closed=max((triaged or 0) - (human_reviewed or 0), 0),
+        human_reviewed=human_reviewed or 0,
+        avg_resolution_time=round(avg_resolution_time or 0.0, 2),
+        mtta=round(mtta or 0.0, 2),
+        mttr=round(avg_resolution_time or 0.0, 2),
+    )
+
+
+async def fetch_triage_metrics(start_date: datetime, end_date: datetime) -> TriageMetric:
+    async with db_manager.get_session() as session:
+        triage_row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE requires_human_review = true) AS human_reviewed,
+                        AVG(processing_time_ms) AS avg_processing_ms,
+                        AVG(confidence_score) AS avg_confidence
+                    FROM triage_results
+                    WHERE created_at BETWEEN :start AND :end
+                    """
+                ),
+                {"start": start_date, "end": end_date},
+            )
+        ).fetchone()
+
+    total = triage_row.total if triage_row else 0
+    human_reviewed = triage_row.human_reviewed if triage_row else 0
+    avg_processing_ms = triage_row.avg_processing_ms if triage_row else 0.0
+    avg_confidence = triage_row.avg_confidence if triage_row else 0.0
+
+    return TriageMetric(
+        avg_triage_time_seconds=round((avg_processing_ms or 0.0) / 1000.0, 2),
+        triaged_by_ai=max(total - human_reviewed, 0),
+        triaged_by_human=human_reviewed or 0,
+        accuracy_score=float(avg_confidence or 0.0),
+        false_positive_rate=0.0,
+    )
+
+
+async def fetch_automation_metrics(start_date: datetime, end_date: datetime) -> AutomationMetric:
+    async with db_manager.get_session() as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE status = 'completed') AS successful,
+                        AVG(EXTRACT(EPOCH FROM (COALESCE(completed_at, started_at) - started_at))) AS avg_seconds
+                    FROM playbook_executions
+                    WHERE started_at BETWEEN :start AND :end
+                    """
+                ),
+                {"start": start_date, "end": end_date},
+            )
+        ).fetchone()
+
+    total = row.total if row else 0
+    successful = row.successful if row else 0
+    avg_seconds = row.avg_seconds if row else 0.0
+    return AutomationMetric(
+        playbooks_executed=total or 0,
+        actions_executed=total or 0,
+        success_rate=(successful / total) if total else 0.0,
+        avg_execution_time_seconds=round(avg_seconds or 0.0, 2),
+        time_saved_hours=(total or 0) * 0.5,
+    )
+
+
+async def fetch_trends(metric_type: str, start_date: datetime, end_date: datetime) -> list[TrendData]:
+    if metric_type == "alert_volume":
+        query = """
+            SELECT DATE_TRUNC('hour', received_at) AS bucket, COUNT(*) AS value
+            FROM alerts
+            WHERE received_at BETWEEN :start AND :end
+            GROUP BY bucket
+            ORDER BY bucket
+        """
+    elif metric_type == "triage_accuracy":
+        query = """
+            SELECT DATE_TRUNC('hour', created_at) AS bucket, AVG(confidence_score) * 100 AS value
+            FROM triage_results
+            WHERE created_at BETWEEN :start AND :end
+            GROUP BY bucket
+            ORDER BY bucket
+        """
+    elif metric_type == "automation_rate":
+        query = """
+            SELECT DATE_TRUNC('hour', started_at) AS bucket,
+                   COUNT(*) FILTER (WHERE status = 'completed')::float / NULLIF(COUNT(*), 0) * 100 AS value
+            FROM playbook_executions
+            WHERE started_at BETWEEN :start AND :end
+            GROUP BY bucket
+            ORDER BY bucket
+        """
+    else:
+        raise HTTPException(status_code=404, detail=f"Unknown metric type: {metric_type}")
+
+    async with db_manager.get_session() as session:
+        result = await session.execute(text(query), {"start": start_date, "end": end_date})
+        rows = result.fetchall()
+
+    return [
+        TrendData(
+            timestamp=row.bucket,
+            value=float(row.value or 0.0),
+            label=row.bucket.strftime("%m-%d %H:%M"),
+        )
+        for row in rows
+        if row.bucket is not None
+    ]
 
 
 @app.get("/api/v1/dashboard", response_model=Dict[str, Any])
 async def get_dashboard():
     """Get complete dashboard data."""
-    try:
-        # Calculate metrics from cache
-        alert_metrics = AlertMetric(
-            total_alerts=metrics_cache["alerts"]["total"],
-            by_severity=metrics_cache["alerts"]["by_severity"].copy(),
-            by_type=metrics_cache["alerts"]["by_type"].copy(),
-            triaged=metrics_cache["alerts"]["triaged"],
-            auto_closed=metrics_cache["alerts"]["triaged"]
-            - metrics_cache["alerts"]["human_reviewed"],
-            human_reviewed=metrics_cache["triage"]["human_triaged"],
-        )
+    start_date, end_date = calculate_time_range(TimeRange.LAST_24H)
+    alert_metrics = await fetch_alert_metrics(start_date, end_date)
+    triage_metrics = await fetch_triage_metrics(start_date, end_date)
+    automation_metrics = await fetch_automation_metrics(start_date, end_date)
+    trends = {
+        "alert_volume": [t.model_dump() for t in await fetch_trends("alert_volume", start_date, end_date)],
+        "triage_accuracy": [t.model_dump() for t in await fetch_trends("triage_accuracy", start_date, end_date)],
+        "automation_rate": [t.model_dump() for t in await fetch_trends("automation_rate", start_date, end_date)],
+    }
 
-        # Calculate triage metrics
-        triage_count = metrics_cache["triage"]["triage_count"]
-        if triage_count > 0:
-            avg_triage_time = metrics_cache["triage"]["total_triage_time"] / triage_count
-            accuracy = metrics_cache["triage"]["accurate"] / triage_count
-        else:
-            avg_triage_time = 0.0
-            accuracy = 0.0
+    async with db_manager.get_session() as session:
+        top_rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT alert_id, alert_type, severity, description
+                    FROM alerts
+                    WHERE received_at BETWEEN :start AND :end
+                    ORDER BY
+                      CASE severity
+                        WHEN 'critical' THEN 5
+                        WHEN 'high' THEN 4
+                        WHEN 'medium' THEN 3
+                        WHEN 'low' THEN 2
+                        ELSE 1
+                      END DESC,
+                      received_at DESC
+                    LIMIT 5
+                    """
+                ),
+                {"start": start_date, "end": end_date},
+            )
+        ).fetchall()
 
-        triage_metrics = TriageMetric(
-            avg_triage_time_seconds=avg_triage_time,
-            triaged_by_ai=metrics_cache["triage"]["ai_triaged"],
-            triaged_by_human=metrics_cache["triage"]["human_triaged"],
-            accuracy_score=accuracy,
-            false_positive_rate=metrics_cache["triage"]["false_positives"] / max(triage_count, 1),
-        )
-
-        # Calculate automation metrics
-        playbook_count = metrics_cache["automation"]["playbooks_executed"]
-        if playbook_count > 0:
-            success_rate = metrics_cache["automation"]["successful"] / playbook_count
-            avg_execution_time = metrics_cache["automation"]["total_time"] / playbook_count
-        else:
-            success_rate = 0.0
-            avg_execution_time = 0.0
-
-        automation_metrics = AutomationMetric(
-            playbooks_executed=playbook_count,
-            actions_executed=metrics_cache["automation"]["actions_executed"],
-            success_rate=success_rate,
-            avg_execution_time_seconds=avg_execution_time,
-            time_saved_hours=metrics_cache["automation"]["actions_executed"]
-            * 0.5,  # Estimate: 30 min per action
-        )
-
-        # Get trends
-        trends = {
-            "alert_volume": trends_cache["alert_volume"][-24:],  # Last 24 data points
-            "triage_accuracy": trends_cache["triage_accuracy"][-24:],
-            "automation_rate": trends_cache["automation_rate"][-24:],
-        }
-
-        dashboard = DashboardData(
-            alert_metrics=alert_metrics,
-            triage_metrics=triage_metrics,
-            automation_metrics=automation_metrics,
-            trends=trends,
-            top_alerts=[],  # TODO: Implement top alerts query
-        )
-
-        return {
-            "success": True,
-            "data": dashboard.model_dump(),
-            "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to generate dashboard: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to generate dashboard: {str(e)}")
+    dashboard = DashboardData(
+        alert_metrics=alert_metrics,
+        triage_metrics=triage_metrics,
+        automation_metrics=automation_metrics,
+        trends=trends,
+        top_alerts=[
+            {
+                "alert_id": row.alert_id,
+                "type": row.alert_type,
+                "severity": row.severity,
+                "description": row.description,
+            }
+            for row in top_rows
+        ],
+    )
+    return {"success": True, "data": dashboard.model_dump(), "meta": response_meta()}
 
 
 @app.get("/api/v1/metrics/alerts", response_model=Dict[str, Any])
 async def get_alert_metrics(time_range: TimeRange = Query(TimeRange.LAST_24H)):
-    """Get alert metrics."""
-    try:
-        start_date, end_date = calculate_time_range(time_range)
-
-        # TODO: Query actual data from database
-        # For now, return cached metrics
-        metrics = AlertMetric(
-            total_alerts=metrics_cache["alerts"]["total"],
-            by_severity=metrics_cache["alerts"]["by_severity"].copy(),
-            by_type=metrics_cache["alerts"]["by_type"].copy(),
-            triaged=metrics_cache["alerts"]["triaged"],
-            auto_closed=metrics_cache["alerts"]["triaged"]
-            - metrics_cache["triage"]["human_triaged"],
-            human_reviewed=metrics_cache["triage"]["human_triaged"],
-        )
-
-        return {
-            "success": True,
-            "data": metrics.model_dump(),
-            "meta": {
-                "timestamp": datetime.utcnow().isoformat(),
-                "request_id": str(uuid.uuid4()),
-                "time_range": {"start": start_date.isoformat(), "end": end_date.isoformat()},
-            },
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to get alert metrics: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get alert metrics: {str(e)}")
+    start_date, end_date = calculate_time_range(time_range)
+    metrics = await fetch_alert_metrics(start_date, end_date)
+    return {
+        "success": True,
+        "data": metrics.model_dump(),
+        "meta": response_meta({"time_range": {"start": start_date.isoformat(), "end": end_date.isoformat()}}),
+    }
 
 
 @app.get("/api/v1/metrics/triage", response_model=Dict[str, Any])
-async def get_triage_metrics(time_range: TimeRange = Query(TimeRange.LAST_24H)):
-    """Get triage performance metrics."""
-    try:
-        start_date, end_date = calculate_time_range(time_range)
-
-        triage_count = metrics_cache["triage"]["triage_count"]
-        if triage_count > 0:
-            avg_time = metrics_cache["triage"]["total_triage_time"] / triage_count
-            accuracy = metrics_cache["triage"]["accurate"] / triage_count
-        else:
-            avg_time = 0.0
-            accuracy = 0.0
-
-        metrics = TriageMetric(
-            avg_triage_time_seconds=avg_time,
-            triaged_by_ai=metrics_cache["triage"]["ai_triaged"],
-            triaged_by_human=metrics_cache["triage"]["human_triaged"],
-            accuracy_score=accuracy,
-            false_positive_rate=metrics_cache["triage"]["false_positives"] / max(triage_count, 1),
-        )
-
-        return {
-            "success": True,
-            "data": metrics.model_dump(),
-            "meta": {
-                "timestamp": datetime.utcnow().isoformat(),
-                "request_id": str(uuid.uuid4()),
-                "time_range": {"start": start_date.isoformat(), "end": end_date.isoformat()},
-            },
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to get triage metrics: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get triage metrics: {str(e)}")
+async def get_triage_metrics_endpoint(time_range: TimeRange = Query(TimeRange.LAST_24H)):
+    start_date, end_date = calculate_time_range(time_range)
+    metrics = await fetch_triage_metrics(start_date, end_date)
+    return {
+        "success": True,
+        "data": metrics.model_dump(),
+        "meta": response_meta({"time_range": {"start": start_date.isoformat(), "end": end_date.isoformat()}}),
+    }
 
 
 @app.get("/api/v1/metrics/automation", response_model=Dict[str, Any])
 async def get_automation_metrics(time_range: TimeRange = Query(TimeRange.LAST_24H)):
-    """Get automation metrics."""
-    try:
-        start_date, end_date = calculate_time_range(time_range)
-
-        playbook_count = metrics_cache["automation"]["playbooks_executed"]
-        if playbook_count > 0:
-            success_rate = metrics_cache["automation"]["successful"] / playbook_count
-            avg_time = metrics_cache["automation"]["total_time"] / playbook_count
-        else:
-            success_rate = 0.0
-            avg_time = 0.0
-
-        metrics = AutomationMetric(
-            playbooks_executed=playbook_count,
-            actions_executed=metrics_cache["automation"]["actions_executed"],
-            success_rate=success_rate,
-            avg_execution_time_seconds=avg_time,
-            time_saved_hours=metrics_cache["automation"]["actions_executed"] * 0.5,
-        )
-
-        return {
-            "success": True,
-            "data": metrics.model_dump(),
-            "meta": {
-                "timestamp": datetime.utcnow().isoformat(),
-                "request_id": str(uuid.uuid4()),
-                "time_range": {"start": start_date.isoformat(), "end": end_date.isoformat()},
-            },
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to get automation metrics: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get automation metrics: {str(e)}")
+    start_date, end_date = calculate_time_range(time_range)
+    metrics = await fetch_automation_metrics(start_date, end_date)
+    return {
+        "success": True,
+        "data": metrics.model_dump(),
+        "meta": response_meta({"time_range": {"start": start_date.isoformat(), "end": end_date.isoformat()}}),
+    }
 
 
 @app.get("/api/v1/trends/{metric_type}", response_model=Dict[str, Any])
 async def get_trends(metric_type: str, time_range: TimeRange = Query(TimeRange.LAST_24H)):
-    """Get trend data for a specific metric."""
-    try:
-        start_date, end_date = calculate_time_range(time_range)
-
-        # Filter trends by time range
-        trends = trends_cache.get(metric_type, [])
-        filtered_trends = [t for t in trends if start_date <= t.timestamp <= end_date]
-
-        return {
-            "success": True,
-            "data": {
-                "metric_type": metric_type,
-                "time_range": time_range.value,
-                "trends": [t.model_dump() for t in filtered_trends],
-            },
-            "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to get trends: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get trends: {str(e)}")
+    start_date, end_date = calculate_time_range(time_range)
+    trends = await fetch_trends(metric_type, start_date, end_date)
+    return {
+        "success": True,
+        "data": {
+            "metric_type": metric_type,
+            "time_range": time_range.value,
+            "trends": [trend.model_dump() for trend in trends],
+        },
+        "meta": response_meta(),
+    }
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    async with db_manager.get_session() as session:
+        total_alerts = await session.scalar(text("SELECT COUNT(*) FROM alerts"))
     return {
         "status": "healthy",
         "service": "data-analytics",
-        "timestamp": datetime.utcnow().isoformat(),
-        "metrics": {
-            "total_alerts": metrics_cache["alerts"]["total"],
-            "trend_series": len(trends_cache),
-        },
+        "timestamp": utc_now_iso(),
+        "metrics": {"total_alerts": total_alerts or 0},
     }
 
 

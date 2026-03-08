@@ -27,8 +27,16 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now, utc_now_iso
 
 logger = get_logger(__name__)
+
+
+class _BatchContextDict(dict):
+    """Compatibility wrapper: iterate over values while preserving key lookup."""
+
+    def __iter__(self):
+        return iter(self.values())
 
 
 class NetworkCollector:
@@ -94,8 +102,9 @@ class NetworkCollector:
         # Build network context
         context = {
             "ip": ip,
+            "ip_address": ip,
             "is_internal": self._is_internal_ip(ip),
-            "collected_at": datetime.utcnow().isoformat(),
+            "collected_at": utc_now_iso(),
         }
 
         # Collect geolocation data
@@ -306,7 +315,7 @@ class NetworkCollector:
         """Get value from cache if not expired."""
         if key in self.cache:
             data, expiry = self.cache[key]
-            if datetime.utcnow() < expiry:
+            if utc_now() < expiry:
                 return data
             else:
                 del self.cache[key]
@@ -314,19 +323,20 @@ class NetworkCollector:
 
     def _put_in_cache(self, key: str, data: Any):
         """Put value in cache with expiry time."""
-        expiry = datetime.utcnow() + self.cache_ttl
+        expiry = utc_now() + self.cache_ttl
         self.cache[key] = (data, expiry)
 
     def _empty_context(self, ip: str) -> Dict[str, Any]:
         """Return empty context for invalid IP."""
         return {
             "ip": ip,
+            "ip_address": ip,
             "is_internal": False,
             "geolocation": None,
             "reputation": None,
             "subnet": None,
             "anomalies": [],
-            "collected_at": datetime.utcnow().isoformat(),
+            "collected_at": utc_now_iso(),
             "error": "Invalid IP address",
         }
 
@@ -345,7 +355,7 @@ class NetworkCollector:
         tasks = [self.collect_context(ip) for ip in ips]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        context_map = {}
+        context_map = _BatchContextDict()
         for ip, result in zip(ips, results):
             if isinstance(result, Exception):
                 logger.error(f"Error collecting context for {ip}: {result}")
@@ -367,7 +377,7 @@ class NetworkCollector:
             "cache_ttl_seconds": int(self.cache_ttl.total_seconds()),
             "expired_entries": sum(
                 1 for _, expiry in self.cache.values()
-                if datetime.utcnow() >= expiry
+                if utc_now() >= expiry
             ),
         }
 

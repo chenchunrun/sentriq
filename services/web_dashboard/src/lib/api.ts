@@ -22,6 +22,7 @@ import type {
   Notification,
   Workflow,
   ThreatIntelSource,
+  AuthUser,
 } from '@/types'
 
 // API Base URL (from environment variable or default)
@@ -38,6 +39,28 @@ const apiClient: AxiosInstance = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+const decodeJwtPayload = (): Record<string, unknown> | null => {
+  const token = localStorage.getItem('access_token')
+  if (!token) {
+    return null
+  }
+
+  try {
+    const [, payload] = token.split('.')
+    if (!payload) {
+      return null
+    }
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))
+  } catch {
+    return null
+  }
+}
+
+const getCurrentUserId = (): string => {
+  const payload = decodeJwtPayload()
+  return typeof payload?.sub === 'string' ? payload.sub : 'local-user'
+}
 
 /**
  * Request interceptor to add auth token
@@ -78,8 +101,8 @@ export const authApi = {
    * Login with username and password
    */
   login: async (credentials: LoginCredentials): Promise<AuthToken> => {
-    const response = await apiClient.post<ApiResponse<AuthToken>>('/auth/login', credentials)
-    const token = response.data.data
+    const response = await apiClient.post<AuthToken>('/auth/login', credentials)
+    const token = response.data
 
     // Store tokens
     localStorage.setItem('access_token', token.access_token)
@@ -109,15 +132,23 @@ export const authApi = {
       throw new Error('No refresh token available')
     }
 
-    const response = await apiClient.post<ApiResponse<AuthToken>>('/auth/refresh', {
+    const response = await apiClient.post<AuthToken>('/auth/refresh', {
       refresh_token: refreshToken,
     })
 
-    const token = response.data.data
+    const token = response.data
     localStorage.setItem('access_token', token.access_token)
     localStorage.setItem('refresh_token', token.refresh_token)
 
     return token
+  },
+
+  /**
+   * Fetch authenticated user profile
+   */
+  me: async (): Promise<AuthUser> => {
+    const response = await apiClient.get<AuthUser>('/auth/me')
+    return response.data
   },
 }
 
@@ -130,10 +161,33 @@ export const alertApi = {
    * Get paginated list of alerts
    */
   getAlerts: async (filters?: AlertFilters): Promise<PaginatedResponse<Alert>> => {
-    const response = await apiClient.get<ApiResponse<PaginatedResponse<Alert>>>('/alerts', {
-      params: filters,
+    const page = filters?.page || 1
+    const pageSize = filters?.page_size || 20
+    const params = {
+      ...filters,
+      skip: Math.max(0, (page - 1) * pageSize),
+      limit: pageSize,
+      sort_by: filters?.sort_by === 'created_at' ? 'received_at' : filters?.sort_by,
+    }
+    delete (params as Partial<AlertFilters>).page
+    delete (params as Partial<AlertFilters>).page_size
+    delete (params as Partial<AlertFilters>).date_from
+    delete (params as Partial<AlertFilters>).date_to
+
+    const response = await apiClient.get<ApiResponse<Alert[]>>('/alerts', {
+      params,
     })
-    return response.data.data
+    const items = response.data.data || []
+    const meta = response.data.meta || {}
+    const total = Number(meta.total || items.length || 0)
+
+    return {
+      data: items,
+      total,
+      page,
+      page_size: pageSize,
+      total_pages: Math.max(1, Math.ceil(total / pageSize)),
+    }
   },
 
   /**
@@ -148,8 +202,22 @@ export const alertApi = {
    * Create new alert
    */
   createAlert: async (alert: Partial<Alert>): Promise<Alert> => {
-    const response = await apiClient.post<ApiResponse<Alert>>('/alerts', alert)
-    return response.data.data
+    const payload = {
+      alert_type: alert.alert_type || alert.metadata?.type || 'other',
+      severity: alert.severity || 'medium',
+      title: alert.title,
+      description: alert.description,
+      source_ip: alert.source_ip,
+      destination_ip: alert.destination_ip || alert.target_ip,
+      file_hash: alert.file_hash,
+      url: alert.url,
+      asset_id: alert.asset_id,
+      user_id: alert.user_id,
+      source: typeof alert.metadata?.source === 'string' ? alert.metadata.source : 'web_dashboard',
+      raw_data: alert.metadata || {},
+    }
+    const response = await apiClient.post<Alert>('/alerts', payload)
+    return response.data
   },
 
   /**
@@ -168,11 +236,30 @@ export const alertApi = {
     status: string,
     note?: string
   ): Promise<Alert> => {
-    const response = await apiClient.patch<ApiResponse<Alert>>(
+    const response = await apiClient.patch<Alert>(
       `/alerts/${alertId}/status`,
-      { status, note }
+      { status, comment: note }
     )
-    return response.data.data
+    return response.data
+  },
+
+  bulkAction: async (
+    alertIds: string[],
+    action: 'assign' | 'close',
+    params?: Record<string, unknown>
+  ): Promise<{
+    action: string
+    total: number
+    success_count: number
+    failure_count: number
+    errors: Array<{ alert_id: string; error: string }>
+  }> => {
+    const response = await apiClient.post('/alerts/bulk', {
+      alert_ids: alertIds,
+      action,
+      params,
+    })
+    return response.data
   },
 
   /**
@@ -226,10 +313,29 @@ export const analyticsApi = {
     date_from?: string
     date_to?: string
   }): Promise<AlertMetrics> => {
-    const response = await apiClient.get<ApiResponse<AlertMetrics>>('/metrics', {
-      params: filters,
-    })
-    return response.data.data
+    const timeRange = filters?.date_from || filters?.date_to ? '7d' : '24h'
+    const [dashboardResponse, severityResponse, statusResponse] = await Promise.all([
+      apiClient.get('/analytics/dashboard', {
+        params: {
+          time_range: timeRange,
+          include_trends: true,
+        },
+      }),
+      apiClient.get('/analytics/metrics/severity-distribution'),
+      apiClient.get('/analytics/metrics/status-distribution'),
+    ])
+    const data = dashboardResponse.data
+    const bySeverity = severityResponse.data || {}
+    const byStatus = statusResponse.data || {}
+    return {
+      total_alerts: data.total_alerts || 0,
+      by_severity: bySeverity,
+      by_type: {},
+      by_status: byStatus,
+      avg_resolution_time: data.avg_response_time || 0,
+      mtta: 0,
+      mttr: data.avg_response_time || 0,
+    } as AlertMetrics
   },
 
   /**
@@ -240,20 +346,37 @@ export const analyticsApi = {
     date_to?: string
     interval?: 'hour' | 'day' | 'week' | 'month'
   }): Promise<AlertTrends> => {
-    const response = await apiClient.get<ApiResponse<AlertTrends>>('/trends', {
-      params: filters,
+    const groupBy = filters?.interval === 'day' || filters?.interval === 'week' || filters?.interval === 'month'
+      ? 'day'
+      : 'hour'
+    const response = await apiClient.get('/analytics/trends/alerts', {
+      params: {
+        time_range: filters?.date_from || filters?.date_to ? '7d' : '24h',
+        group_by: groupBy,
+      },
     })
-    return response.data.data
+    const points = response.data.data_points || []
+    return {
+      daily: points,
+      weekly: points,
+      monthly: points,
+    }
   },
 
   /**
    * Get top alert types
    */
   getTopAlerts: async (limit?: number): Promise<TopAlerts[]> => {
-    const response = await apiClient.get<ApiResponse<TopAlerts[]>>('/top-alerts', {
+    const response = await apiClient.get('/analytics/metrics/top-alert-types', {
       params: { limit },
     })
-    return response.data.data
+    const rows = response.data || []
+    const total = rows.reduce((sum: number, item: { count?: number }) => sum + (item.count || 0), 0)
+    return rows.map((item: { alert_type: string; count: number }) => ({
+      alert_type: item.alert_type,
+      count: item.count,
+      percentage: total > 0 ? (item.count / total) * 100 : 0,
+    }))
   },
 }
 
@@ -266,31 +389,76 @@ export const reportApi = {
    * Get list of reports
    */
   getReports: async (): Promise<Report[]> => {
-    const response = await apiClient.get<ApiResponse<Report[]>>('/reports')
-    return response.data.data
+    const response = await apiClient.get<ApiResponse<{ reports: Array<Record<string, unknown>> }>>('/reports')
+    const reports = response.data.data?.reports || []
+    return reports.map((report) => ({
+      id: String(report.report_id || ''),
+      name: String(report.name || report.report_id || 'Unnamed report'),
+      description: typeof report.description === 'string' ? report.description : undefined,
+      type: String(report.report_type || 'custom'),
+      format: (report.format || 'html') as Report['format'],
+      status: (report.status || 'pending') as Report['status'],
+      created_at: String(report.created_at || new Date().toISOString()),
+      created_by: String(report.created_by || 'system'),
+      file_url: typeof report.file_path === 'string' ? report.file_path : undefined,
+    }))
   },
 
   /**
    * Create new report
    */
   createReport: async (report: ReportRequest): Promise<Report> => {
-    const response = await apiClient.post<ApiResponse<Report>>('/reports', report)
-    return response.data.data
+    const payload = {
+      name: report.name,
+      description: report.description,
+      format: report.format,
+      report_type: report.type,
+      date: report.date,
+      alert_id: report.alert_id,
+      parameters: report.filters,
+    }
+    const response = await apiClient.post<ApiResponse<Record<string, unknown>>>('/reports/generate', payload)
+    const data = response.data.data || {}
+    return {
+      id: String(data.report_id || ''),
+      name: String(data.name || report.name),
+      description: typeof data.description === 'string' ? data.description : report.description,
+      type: String(data.report_type || report.type),
+      format: (data.format || report.format || 'html') as Report['format'],
+      status: (data.status || 'pending') as Report['status'],
+      created_at: new Date().toISOString(),
+      created_by: 'system',
+    }
   },
 
   /**
    * Get report by ID
    */
   getReport: async (reportId: string): Promise<Report> => {
-    const response = await apiClient.get<ApiResponse<Report>>(`/reports/${reportId}`)
-    return response.data.data
+    const response = await apiClient.get<ApiResponse<Record<string, unknown>>>(`/reports/${reportId}`)
+    const report = response.data.data || {}
+    return {
+      id: String(report.report_id || reportId),
+      name: String(report.name || reportId),
+      description: typeof report.description === 'string' ? report.description : undefined,
+      type: String(report.report_type || 'custom'),
+      format: (report.format || 'html') as Report['format'],
+      status: (report.status || 'pending') as Report['status'],
+      created_at: String(report.created_at || new Date().toISOString()),
+      created_by: String(report.created_by || 'system'),
+      file_url: typeof report.file_path === 'string' ? report.file_path : undefined,
+    }
   },
 
   /**
    * Download report file
    */
   downloadReport: async (reportId: string): Promise<Blob> => {
+    const report = await reportApi.getReport(reportId)
     const response = await apiClient.get(`/reports/${reportId}/download`, {
+      params: {
+        format: report.format === 'pdf' ? 'html' : report.format === 'excel' ? 'csv' : report.format,
+      },
       responseType: 'blob',
     })
     return response.data
@@ -313,34 +481,86 @@ export const configApi = {
    * Get all system configurations
    */
   getConfigs: async (category?: string): Promise<SystemConfig[]> => {
-    const response = await apiClient.get<ApiResponse<SystemConfig[]>>('/config', {
+    const response = await apiClient.get<ApiResponse<Record<string, {
+      value: Record<string, unknown>
+      category?: string
+      description?: string
+      editable?: boolean
+    }>>>('/config', {
       params: { category },
     })
-    return response.data.data
+    const groups = response.data.data || {}
+    const entries = Object.entries(groups)
+
+    return entries.flatMap(([groupKey, group]) =>
+      Object.entries(group.value || {}).map(([key, value]) => ({
+        key,
+        value: value as SystemConfig['value'],
+        description: group.description || `${groupKey} setting`,
+        category: group.category || groupKey,
+        editable: group.editable !== false,
+      }))
+    )
   },
 
   /**
    * Update configuration
    */
-  updateConfig: async (key: string, value: string | number | boolean): Promise<SystemConfig> => {
-    const response = await apiClient.put<ApiResponse<SystemConfig>>(`/config/${key}`, {
-      value,
+  updateConfig: async (
+    key: string,
+    value: string | number | boolean | string[] | Record<string, unknown>
+  ): Promise<SystemConfig> => {
+    const response = await apiClient.get<ApiResponse<Record<string, {
+      value: Record<string, unknown>
+      category?: string
+    }>>>('/config')
+    const groups = response.data.data || {}
+    const match = Object.entries(groups).find(([, group]) =>
+      Object.prototype.hasOwnProperty.call(group.value || {}, key)
+    )
+
+    if (!match) {
+      throw new Error(`Unknown config key: ${key}`)
+    }
+
+    const [groupKey, group] = match
+    const nextValue = {
+      ...(group.value || {}),
+      [key]: value,
+    }
+
+    await apiClient.put(`/config/${groupKey}`, nextValue, {
+      params: { changed_by: getCurrentUserId() },
     })
-    return response.data.data
+
+    return {
+      key,
+      value,
+      description: `${groupKey} setting`,
+      category: group.category || groupKey,
+      editable: true,
+    }
   },
 
   /**
    * Reset configuration to defaults
    */
   resetToDefaults: async (category?: string): Promise<void> => {
-    await apiClient.post('/config/reset', { category })
+    if (!category || category === 'preferences') {
+      return
+    }
+    await apiClient.post(`/config/${category}/reset`, null, {
+      params: { changed_by: getCurrentUserId() },
+    })
   },
 
   /**
    * Get user preferences
    */
   getPreferences: async (): Promise<UserPreferences> => {
-    const response = await apiClient.get<ApiResponse<UserPreferences>>('/config/preferences')
+    const response = await apiClient.get<ApiResponse<UserPreferences>>('/config/preferences', {
+      params: { user_id: getCurrentUserId() },
+    })
     return response.data.data
   },
 
@@ -348,7 +568,9 @@ export const configApi = {
    * Update user preferences
    */
   updatePreferences: async (prefs: Partial<UserPreferences>): Promise<UserPreferences> => {
-    const response = await apiClient.put<ApiResponse<UserPreferences>>('/config/preferences', prefs)
+    const response = await apiClient.put<ApiResponse<UserPreferences>>('/config/preferences', prefs, {
+      params: { user_id: getCurrentUserId() },
+    })
     return response.data.data
   },
 
@@ -385,6 +607,35 @@ export const workflowApi = {
   },
 
   /**
+   * Get workflow executions
+   */
+  getExecutions: async (filters?: { status?: string }): Promise<any[]> => {
+    const response = await apiClient.get<ApiResponse<{ executions: any[]; total: number }>>('/workflows/executions', {
+      params: filters,
+    })
+    return response.data.data?.executions || []
+  },
+
+  /**
+   * Start a workflow execution
+   */
+  executeWorkflow: async (
+    workflowId: string,
+    inputData?: Record<string, unknown>
+  ): Promise<{
+    execution_id: string
+    workflow_id: string
+    status: string
+    started_at: string
+  }> => {
+    const response = await apiClient.post('/workflows/execute', {
+      workflow_id: workflowId,
+      input_data: inputData || {},
+    })
+    return response.data.data
+  },
+
+  /**
    * Create new workflow
    */
   createWorkflow: async (workflow: Partial<Workflow>): Promise<Workflow> => {
@@ -411,8 +662,25 @@ export const workflowApi = {
    * Get workflow templates
    */
   getWorkflowTemplates: async (): Promise<AutomationTemplate[]> => {
-    const response = await apiClient.get<ApiResponse<AutomationTemplate[]>>('/workflow-templates')
-    return response.data.data
+    const response = await apiClient.get<ApiResponse<{ playbooks: any[]; total: number }>>('/playbooks')
+    const playbooks = response.data.data?.playbooks || []
+    return playbooks.map((playbook: any) => ({
+      id: playbook.playbook_id,
+      name: playbook.name,
+      description: playbook.description,
+      category: inferPlaybookCategory(playbook),
+      steps: Array.isArray(playbook.actions) ? playbook.actions.length : 0,
+      stepDetails: Array.isArray(playbook.actions)
+        ? playbook.actions.map((action: any) => ({
+            id: action.action_id,
+            name: action.name,
+            description: action.description,
+            type: action.action_type === 'manual' ? 'manual' : 'automated',
+            estimated_time: formatDuration(action.timeout_seconds),
+          }))
+        : [],
+      estimated_time: formatDuration(playbook.timeout_seconds),
+    }))
   },
 
   /**
@@ -427,8 +695,19 @@ export const workflowApi = {
     notification_channels: string[]
     log_level: 'debug' | 'info' | 'warning' | 'error'
   }> => {
-    const response = await apiClient.get<ApiResponse<any>>('/workflows/config')
-    return response.data.data
+    const groups = await configApi.getConfigs('automation')
+    const config = Object.fromEntries(groups.map((item) => [item.key, item.value]))
+    return {
+      auto_approve: Boolean(config.approval_required ?? false),
+      timeout_seconds: Number(config.timeout_seconds ?? 600),
+      retry_on_failure: Boolean(config.retry_on_failure ?? true),
+      max_retries: Number(config.max_retries ?? 3),
+      notification_on_complete: Boolean(config.notification_on_complete ?? true),
+      notification_channels: Array.isArray(config.notification_channels)
+        ? config.notification_channels.map(String)
+        : ['email', 'slack'],
+      log_level: (config.log_level || 'info') as 'debug' | 'info' | 'warning' | 'error',
+    }
   },
 
   /**
@@ -443,7 +722,20 @@ export const workflowApi = {
     notification_channels: string[]
     log_level: 'debug' | 'info' | 'warning' | 'error'
   }): Promise<void> => {
-    await apiClient.put('/workflows/config', config)
+    await apiClient.put(
+      '/config/automation',
+      {
+        approval_required: config.auto_approve,
+        timeout_seconds: config.timeout_seconds,
+        max_concurrent_executions: 10,
+        retry_on_failure: config.retry_on_failure,
+        max_retries: config.max_retries,
+        notification_on_complete: config.notification_on_complete,
+        notification_channels: config.notification_channels,
+        log_level: config.log_level,
+      },
+      { params: { changed_by: getCurrentUserId() } }
+    )
   },
 
   /**
@@ -461,12 +753,53 @@ export const workflowApi = {
       log_level: 'debug' | 'info' | 'warning' | 'error'
     }
   ): Promise<Workflow> => {
-    const response = await apiClient.post<ApiResponse<Workflow>>('/workflows/execute-from-template', {
-      template_id: templateId,
-      config,
+    const response = await apiClient.post('/playbooks/execute', {
+      playbook_id: templateId,
+      alert_id: `manual-${Date.now()}`,
+      input_data: {
+        source: 'web_dashboard',
+        config,
+      },
     })
-    return response.data.data
+    return {
+      id: response.data.data.execution_id,
+      name: templateId,
+      description: 'Manual playbook execution',
+      status: response.data.data.status,
+      trigger_alert_id: response.data.data.trigger_alert_id,
+      steps: [],
+      created_at: response.data.data.started_at,
+      updated_at: response.data.data.started_at,
+    } as Workflow
   },
+
+  getAutomationExecutions: async (): Promise<any[]> => {
+    const response = await apiClient.get<ApiResponse<{ executions: any[]; total: number }>>('/executions')
+    return response.data.data?.executions || []
+  },
+
+  cancelAutomationExecution: async (executionId: string): Promise<void> => {
+    await apiClient.post(`/executions/${executionId}/cancel`)
+  },
+}
+
+const formatDuration = (seconds?: number): string => {
+  const totalSeconds = Number(seconds || 0)
+  if (!totalSeconds) {
+    return '0m'
+  }
+  const minutes = Math.max(1, Math.round(totalSeconds / 60))
+  return `${minutes}m`
+}
+
+const inferPlaybookCategory = (playbook: any): AutomationTemplate['category'] => {
+  const id = String(playbook.playbook_id || '').toLowerCase()
+  const name = String(playbook.name || '').toLowerCase()
+  const text = `${id} ${name}`
+  if (text.includes('notify') || text.includes('email')) return 'notification'
+  if (text.includes('enrich') || text.includes('intel')) return 'enrichment'
+  if (text.includes('remed') || text.includes('patch')) return 'remediation'
+  return 'containment'
 }
 
 // =============================================================================

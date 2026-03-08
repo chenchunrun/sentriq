@@ -41,7 +41,7 @@ from shared.models import (
     SuccessResponse,
     TaskType,
 )
-from shared.utils import Config, get_logger
+from shared.utils import Config, get_logger, utc_now, utc_now_iso
 
 logger = get_logger(__name__)
 config = Config()
@@ -98,13 +98,83 @@ MODEL_CAPABILITIES: Dict[LLMModel, ModelCapabilities] = {
         reasoning_quality=6,
         best_for=[TaskType.CLASSIFICATION, TaskType.SUMMARIZATION, TaskType.GENERAL],
     ),
+    # Zhipu (GLM) models
+    LLMModel.ZHIPU_GLM_4_PLUS: ModelCapabilities(
+        model=LLMModel.ZHIPU_GLM_4_PLUS,
+        max_context=32000,
+        supports_streaming=True,
+        cost_per_1k_tokens=0.004,
+        speed=7,
+        reasoning_quality=10,
+        best_for=[TaskType.ANALYSIS, TaskType.TRIAGE, TaskType.GENERAL],
+    ),
+    LLMModel.ZHIPU_GLM_4: ModelCapabilities(
+        model=LLMModel.ZHIPU_GLM_4,
+        max_context=32000,
+        supports_streaming=True,
+        cost_per_1k_tokens=0.003,
+        speed=8,
+        reasoning_quality=9,
+        best_for=[TaskType.ANALYSIS, TaskType.TRIAGE, TaskType.SUMMARIZATION],
+    ),
+    LLMModel.ZHIPU_GLM_4_AIR: ModelCapabilities(
+        model=LLMModel.ZHIPU_GLM_4_AIR,
+        max_context=16000,
+        supports_streaming=True,
+        cost_per_1k_tokens=0.0015,
+        speed=9,
+        reasoning_quality=7,
+        best_for=[TaskType.CLASSIFICATION, TaskType.SUMMARIZATION, TaskType.GENERAL],
+    ),
 }
 
 # Provider API endpoints (configure via environment)
 PROVIDER_ENDPOINTS = {
     LLMProvider.DEEPSEEK: "https://api.deepseek.com/v1",
     LLMProvider.QWEN: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    LLMProvider.ZHIPU: "https://open.bigmodel.cn/api/paas/v4",
 }
+
+
+def _normalize_base_url(url: str) -> str:
+    return url.rstrip("/")
+
+
+def get_zhipu_api_key() -> Optional[str]:
+    return (
+        os.getenv("ZHIPU_API_KEY")
+        or os.getenv("ZHIPUAI_API_KEY")
+        or os.getenv("MASS_SPEC_API_KEY")
+    )
+
+
+def get_zhipu_base_url() -> str:
+    return _normalize_base_url(
+        os.getenv("ZHIPU_BASE_URL")
+        or os.getenv("ZHIPUAI_BASE_URL")
+        or os.getenv("MASS_SPEC_BASE_URL")
+        or PROVIDER_ENDPOINTS[LLMProvider.ZHIPU]
+    )
+
+
+def provider_for_model(model: LLMModel) -> LLMProvider:
+    """Resolve provider from model enum."""
+    if model in {LLMModel.DEEPSEEK_V3, LLMModel.DEEPSEEK_CODER}:
+        return LLMProvider.DEEPSEEK
+    if model in {LLMModel.QWEN3_MAX, LLMModel.QWEN3_PLUS, LLMModel.QWEN3_TURBO}:
+        return LLMProvider.QWEN
+    if model in {LLMModel.ZHIPU_GLM_4, LLMModel.ZHIPU_GLM_4_PLUS, LLMModel.ZHIPU_GLM_4_AIR}:
+        return LLMProvider.ZHIPU
+    raise HTTPException(status_code=400, detail=f"Unknown provider for model {model.value}")
+
+
+def configured_providers() -> Dict[LLMProvider, bool]:
+    """Check which providers have API keys configured."""
+    return {
+        LLMProvider.DEEPSEEK: bool(os.getenv("DEEPSEEK_API_KEY")),
+        LLMProvider.QWEN: bool(os.getenv("QWEN_API_KEY")),
+        LLMProvider.ZHIPU: bool(get_zhipu_api_key()),
+    }
 
 
 # =============================================================================
@@ -112,7 +182,7 @@ PROVIDER_ENDPOINTS = {
 # =============================================================================
 
 
-def extract_iocs(messages: List[Dict[str, str]]) -> Dict[str, List[str]]:
+def extract_iocs(messages: List[Dict[str, str]] | Dict[str, Any]) -> Dict[str, List[str]]:
     """
     Extract Indicators of Compromise (IOCs) from messages.
 
@@ -126,8 +196,11 @@ def extract_iocs(messages: List[Dict[str, str]]) -> Dict[str, List[str]]:
         "cves": [],
     }
 
-    # Combine all message content
-    content = " ".join(msg.get("content", "") for msg in messages)
+    # Backward compatibility: some callers still pass a raw alert dict.
+    if isinstance(messages, dict):
+        content = " ".join(str(value) for value in messages.values() if value is not None)
+    else:
+        content = " ".join(msg.get("content", "") for msg in messages)
 
     # IP addresses (IPv4)
     ip_pattern = r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
@@ -324,7 +397,7 @@ def route_request(request: LLMRequest) -> RouterDecision:
         if not caps:
             raise HTTPException(status_code=400, detail=f"Model {request.model} not found")
 
-        provider = LLMProvider.DEEPSEEK if "deepseek" in request.model.value else LLMProvider.QWEN
+        provider = provider_for_model(request.model)
 
         return RouterDecision(
             selected_provider=provider,
@@ -340,40 +413,57 @@ def route_request(request: LLMRequest) -> RouterDecision:
     # Step 2: Calculate token count
     total_tokens = sum(len(msg.get("content", "")) // 4 for msg in request.messages)
 
-    # Step 3: Select model based on complexity
+    # Step 3: Select model based on complexity and configured providers
+    provider_config = configured_providers()
+    zhipu_ready = provider_config.get(LLMProvider.ZHIPU, False)
+    deepseek_ready = provider_config.get(LLMProvider.DEEPSEEK, False)
+    qwen_ready = provider_config.get(LLMProvider.QWEN, False)
+
     selected_model: Optional[LLMModel] = None
     reason = ""
     confidence = 0.8
 
     if complexity == "high":
-        # High complexity: Use DeepSeek-V3 for deep reasoning
-        # Prefer DeepSeek-V3 if available, otherwise use Qwen3-Max
-        if total_tokens <= MODEL_CAPABILITIES[LLMModel.DEEPSEEK_V3].max_context:
-            selected_model = LLMModel.DEEPSEEK_V3
-            reason = f"High complexity request (factors: {sum(complexity_factors.values())}), using deep reasoning model"
+        # High complexity: Prefer Zhipu GLM-4-Plus if available, else DeepSeek-V3, else Qwen3-Max
+        if zhipu_ready and total_tokens <= MODEL_CAPABILITIES[LLMModel.ZHIPU_GLM_4_PLUS].max_context:
+            selected_model = LLMModel.ZHIPU_GLM_4_PLUS
+            reason = f"High complexity request (factors: {sum(complexity_factors.values())}), using GLM-4-Plus"
             confidence = 0.95
+        elif deepseek_ready and total_tokens <= MODEL_CAPABILITIES[LLMModel.DEEPSEEK_V3].max_context:
+            selected_model = LLMModel.DEEPSEEK_V3
+            reason = f"High complexity request (factors: {sum(complexity_factors.values())}), using DeepSeek-V3"
+            confidence = 0.93
         else:
-            # Context too large, use Qwen3-Max with larger context
+            # Context too large or providers missing, use Qwen3-Max as fallback
             selected_model = LLMModel.QWEN3_MAX
-            reason = f"High complexity with large context, using extended context model"
-            confidence = 0.9
+            reason = "High complexity fallback to Qwen3-Max"
+            confidence = 0.88
 
     elif complexity == "medium":
-        # Medium complexity: Use Qwen3-Max or Qwen3-Plus for balanced performance
-        if request.task_type in [TaskType.TRIAGE, TaskType.ANALYSIS]:
+        # Medium complexity: Prefer Zhipu GLM-4, else Qwen3-Max/Qwen3-Plus
+        if zhipu_ready:
+            selected_model = LLMModel.ZHIPU_GLM_4
+            reason = f"Medium complexity {request.task_type} task, using GLM-4"
+            confidence = 0.9
+        elif request.task_type in [TaskType.TRIAGE, TaskType.ANALYSIS]:
             selected_model = LLMModel.QWEN3_MAX
             reason = f"Medium complexity {request.task_type} task, using balanced model with high reasoning"
-            confidence = 0.9
+            confidence = 0.88
         else:
             selected_model = LLMModel.QWEN3_PLUS
             reason = f"Medium complexity {request.task_type} task, using balanced model"
             confidence = 0.85
 
     else:
-        # Low complexity: Use Qwen3-Turbo for fast response
-        selected_model = LLMModel.QWEN3_TURBO
-        reason = f"Low complexity request, using fast response model"
-        confidence = 0.85
+        # Low complexity: Prefer Zhipu GLM-4-Air if available, else Qwen3-Turbo
+        if zhipu_ready:
+            selected_model = LLMModel.ZHIPU_GLM_4_AIR
+            reason = "Low complexity request, using GLM-4-Air"
+            confidence = 0.85
+        else:
+            selected_model = LLMModel.QWEN3_TURBO
+            reason = "Low complexity request, using fast response model"
+            confidence = 0.82
 
     # Step 4: Verify model can handle the request
     caps = MODEL_CAPABILITIES.get(selected_model)
@@ -386,7 +476,7 @@ def route_request(request: LLMRequest) -> RouterDecision:
                 break
 
     # Step 5: Determine provider from model
-    provider = LLMProvider.DEEPSEEK if "deepseek" in selected_model.value else LLMProvider.QWEN
+    provider = provider_for_model(selected_model)
 
     # Get alternatives based on task type
     alternatives = [
@@ -411,7 +501,8 @@ async def call_deepseek(
     api_key: str,
 ) -> LLMResponse:
     """Call DeepSeek API."""
-    endpoint = f"{PROVIDER_ENDPOINTS[LLMProvider.DEEPSEEK]}/chat/completions"
+    base_url = os.getenv("DEEPSEEK_BASE_URL", PROVIDER_ENDPOINTS[LLMProvider.DEEPSEEK])
+    endpoint = f"{base_url}/chat/completions"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -470,7 +561,8 @@ async def call_qwen(
     api_key: str,
 ) -> LLMResponse:
     """Call Qwen API."""
-    endpoint = f"{PROVIDER_ENDPOINTS[LLMProvider.QWEN]}/chat/completions"
+    base_url = os.getenv("QWEN_BASE_URL", PROVIDER_ENDPOINTS[LLMProvider.QWEN])
+    endpoint = f"{base_url}/chat/completions"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -523,6 +615,64 @@ async def call_qwen(
         raise HTTPException(status_code=502, detail=f"Qwen API error: {str(e)}")
 
 
+async def call_zhipu(
+    request: LLMRequest,
+    decision: RouterDecision,
+    api_key: str,
+) -> LLMResponse:
+    """Call Zhipu (GLM) API with OpenAI-compatible payload."""
+    endpoint = f"{get_zhipu_base_url()}/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": decision.selected_model.value,
+        "messages": request.messages,
+        "temperature": request.temperature,
+        "max_tokens": request.max_tokens,
+        "top_p": request.top_p,
+        "stream": request.stream,
+    }
+
+    try:
+        response = await http_client.post(endpoint, headers=headers, json=payload)
+        response.raise_for_status()
+
+        data = response.json()
+
+        return LLMResponse(
+            id=data.get("id", f"zhipu-{uuid.uuid4()}"),
+            object=data.get("object", "chat.completion"),
+            created=data.get("created", int(time.time())),
+            model=decision.selected_model,
+            provider=LLMProvider.ZHIPU,
+            choices=[
+                LLMChoice(
+                    index=c["index"],
+                    message=LLMMessage(
+                        role=c["message"]["role"],
+                        content=c["message"]["content"],
+                    ),
+                    finish_reason=c.get("finish_reason"),
+                )
+                for c in data.get("choices", [])
+            ],
+            usage=LLMUsage(
+                prompt_tokens=data["usage"]["prompt_tokens"],
+                completion_tokens=data["usage"]["completion_tokens"],
+                total_tokens=data["usage"]["total_tokens"],
+            ),
+            routing_decision=decision.model_dump(),
+        )
+
+    except httpx.HTTPError as e:
+        logger.error(f"Zhipu API error: {e}")
+        raise HTTPException(status_code=502, detail=f"Zhipu API error: {str(e)}")
+
+
 def create_mock_response(request: LLMRequest, decision: RouterDecision) -> LLMResponse:
     """Create a mock LLM response for development/testing."""
     mock_content = f"""# Security Alert Analysis (Mock Response)
@@ -534,6 +684,7 @@ def create_mock_response(request: LLMRequest, decision: RouterDecision) -> LLMRe
 ## Analysis Summary
 This is a mock response generated for development and testing purposes.
 To enable real LLM analysis, configure DEEPSEEK_API_KEY or QWEN_API_KEY in .env
+For Zhipu/质谱AI, configure ZHIPUAI_API_KEY (or ZHIPU_API_KEY).
 
 ## Risk Assessment
 - **Risk Score**: 65/100
@@ -547,7 +698,7 @@ To enable real LLM analysis, configure DEEPSEEK_API_KEY or QWEN_API_KEY in .env
 4. Requires human review for confirmation
 
 ---
-*Generated by {decision.selected_model.value} at {datetime.utcnow().isoformat()}*
+*Generated by {decision.selected_model.value} at {utc_now_iso()}*
 """
 
     return LLMResponse(
@@ -608,8 +759,7 @@ async def chat_completions(request: LLMRequest):
                     raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY not configured")
             else:
                 response = await call_deepseek(request, decision, api_key)
-
-        else:  # QWEN
+        elif decision.selected_provider == LLMProvider.QWEN:
             api_key = os.getenv("QWEN_API_KEY")
             if not api_key or mock_mode:
                 if mock_mode:
@@ -619,6 +769,19 @@ async def chat_completions(request: LLMRequest):
                     raise HTTPException(status_code=500, detail="QWEN_API_KEY not configured")
             else:
                 response = await call_qwen(request, decision, api_key)
+        else:  # ZHIPU
+            api_key = get_zhipu_api_key()
+            if not api_key or mock_mode:
+                if mock_mode:
+                    logger.warning("Using mock LLM response (LLM_MOCK_MODE=true)")
+                    response = create_mock_response(request, decision)
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="ZHIPU_API_KEY or ZHIPUAI_API_KEY not configured",
+                    )
+            else:
+                response = await call_zhipu(request, decision, api_key)
 
         logger.info(
             f"Request completed using {response.provider.value}/{response.model.value} "
@@ -628,7 +791,7 @@ async def chat_completions(request: LLMRequest):
         return SuccessResponse(
             data=response,
             meta=ResponseMeta(
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 request_id=str(uuid.uuid4()),
                 version="1.0.0",
             ),
@@ -647,7 +810,7 @@ async def list_models():
     return SuccessResponse(
         data=MODEL_CAPABILITIES,
         meta=ResponseMeta(
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             request_id=str(uuid.uuid4()),
         ),
     )
@@ -663,7 +826,7 @@ async def get_model_capabilities(model: LLMModel):
     return SuccessResponse(
         data=caps,
         meta=ResponseMeta(
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             request_id=str(uuid.uuid4()),
         ),
     )
@@ -681,7 +844,7 @@ async def route_test(request: LLMRequest):
     return SuccessResponse(
         data=decision,
         meta=ResponseMeta(
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             request_id=str(uuid.uuid4()),
         ),
     )
@@ -711,7 +874,7 @@ async def analyze_request_complexity(request: LLMRequest):
             "estimated_tokens": sum(len(msg.get("content", "")) // 4 for msg in request.messages),
         },
         meta=ResponseMeta(
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             request_id=str(uuid.uuid4()),
         ),
     )
@@ -723,21 +886,24 @@ async def health_check():
     health_status = {
         "status": "healthy",
         "service": "llm-router",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now_iso(),
         "models": {
             "total": len(MODEL_CAPABILITIES),
             "deepseek": len([m for m in MODEL_CAPABILITIES.keys() if "deepseek" in m.value]),
             "qwen": len([m for m in MODEL_CAPABILITIES.keys() if "qwen" in m.value]),
+            "zhipu": len([m for m in MODEL_CAPABILITIES.keys() if "glm" in m.value]),
         },
     }
 
     # Check API keys
     deepseek_key = os.getenv("DEEPSEEK_API_KEY")
     qwen_key = os.getenv("QWEN_API_KEY")
+    zhipu_key = get_zhipu_api_key()
 
     health_status["api_keys"] = {
         "deepseek": "configured" if deepseek_key else "missing",
         "qwen": "configured" if qwen_key else "missing",
+        "zhipu": "configured" if zhipu_key else "missing",
     }
 
     return health_status

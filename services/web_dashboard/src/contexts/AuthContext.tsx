@@ -36,27 +36,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true)
     try {
       const authToken = await api.auth.login(credentials)
+      const accessToken = authToken.access_token
 
       // Store token
-      setToken(authToken.access_token)
+      setToken(accessToken)
 
-      // Fetch actual user info from server
-      const response = await fetch('/api/v1/auth/me', {
-        headers: {
-          'Authorization': `Bearer ${authToken.access_token}`,
-        },
-      })
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch user information')
-      }
-
-      const result = await response.json()
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to fetch user information')
-      }
-
-      const userData = result.data
+      const userData = await api.auth.me()
       const userSession: AuthUser = {
         id: userData.id,
         username: userData.username,
@@ -67,10 +52,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       setUser(userSession)
     } catch (error) {
-      console.error('Login failed:', error)
       setToken(null)
       setUser(null)
-      throw error
+      throw new Error('Authentication failed. Please check your credentials.')
     } finally {
       setIsLoading(false)
     }
@@ -98,29 +82,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setToken(storedToken)
 
         try {
-          // Fetch actual user info from server
-          const response = await fetch('/api/v1/auth/me', {
-            headers: {
-              'Authorization': `Bearer ${storedToken}`,
-            },
-          })
-
-          if (response.ok) {
-            const result = await response.json()
-            if (result.success && result.data) {
-              const userData = result.data
-              const userSession: AuthUser = {
-                id: userData.id,
-                username: userData.username,
-                email: userData.email,
-                role: userData.role,
-                permissions: userData.permissions || [],
-              }
-              setUser(userSession)
-            }
+          const userData = await api.auth.me()
+          const userSession: AuthUser = {
+            id: userData.id,
+            username: userData.username,
+            email: userData.email,
+            role: userData.role,
+            permissions: userData.permissions || [],
           }
-        } catch (error) {
-          console.error('Failed to fetch user info:', error)
+          setUser(userSession)
+        } catch {
           // Clear invalid token
           setToken(null)
           localStorage.removeItem('access_token')

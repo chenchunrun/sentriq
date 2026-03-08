@@ -78,6 +78,18 @@ class Config(BaseSettings):
         default=None,
         description="Qwen API key",
     )
+    zhipu_base_url: Optional[str] = Field(
+        default=None,
+        description="Zhipu MaaS base URL",
+    )
+    zhipu_api_key: Optional[str] = Field(
+        default=None,
+        description="Zhipu API key",
+    )
+    zhipu_model: str = Field(
+        default="glm-4",
+        description="Zhipu model name",
+    )
 
     # Fallback LLM
     llm_api_key: Optional[str] = Field(
@@ -100,6 +112,12 @@ class Config(BaseSettings):
         description="JWT secret key",
     )
     jwt_algorithm: str = "HS256"
+
+    # Temporal
+    temporal_enabled: bool = False
+    temporal_server_url: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "security-triage-workflows"
 
     model_config = ConfigDict(
         env_file=".env", case_sensitive=False, extra="ignore"  # Ignore extra fields from .env file

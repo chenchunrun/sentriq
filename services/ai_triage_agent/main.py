@@ -29,7 +29,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI
@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from shared.database import DatabaseManager, close_database, get_database_manager, init_database
 from shared.messaging import MessageConsumer, MessagePublisher
-from shared.models import SecurityAlert
+from shared.models import LLMRequest, SecurityAlert, TaskType
 from shared.utils import Config, get_logger
 
 # Initialize logger
@@ -541,49 +541,38 @@ async def parse_llm_response(llm_response: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
-async def get_llm_route_from_router(task_type: str, complexity: str) -> Dict[str, Any]:
+async def call_llm_via_router(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 2000,
+    temperature: float = 0.0,
+) -> Dict[str, Any]:
     """
-    Query LLM Router for routing decision.
+    Call LLM Router to execute chat completions.
 
-    Args:
-        task_type: Type of task (triage, analysis, classification, etc)
-        complexity: Complexity level (high, medium, low)
-
-    Returns:
-        Routing decision with model and endpoint info
+    Returns raw LLM response payload (choices/usage/etc).
     """
-    try:
-        response = await http_client.post(
-            f"{LLM_ROUTER_URL}/api/v1/route",
-            json={
-                "task_type": task_type,
-                "complexity": complexity,
-                "estimated_tokens": 1500,
-            },
-            timeout=5.0,
-        )
+    request_payload = LLMRequest(
+        task_type=TaskType.TRIAGE,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    ).model_dump()
 
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.warning(f"LLM Router returned {response.status_code}, using fallback")
-            # Fallback to default
-            return {
-                "model": "qwen-plus",
-                "provider": "qwen",
-                "base_url": getattr(config, "qwen_base_url", "http://internal-maas.qwen/v1"),
-                "api_key": getattr(config, "qwen_api_key", "internal-key-456"),
-            }
+    response = await http_client.post(
+        f"{LLM_ROUTER_URL}/api/v1/chat/completions",
+        json=request_payload,
+        timeout=30.0,
+    )
+    response.raise_for_status()
 
-    except Exception as e:
-        logger.error(f"Failed to query LLM Router: {e}, using fallback")
-        # Fallback to default
-        return {
-            "model": "qwen-plus",
-            "provider": "qwen",
-            "base_url": getattr(config, "qwen_base_url", "http://internal-maas.qwen/v1"),
-            "api_key": getattr(config, "qwen_api_key", "internal-key-456"),
-        }
+    payload = response.json()
+    if "data" in payload:
+        return payload["data"]
+    return payload
 
 
 # =============================================================================
@@ -630,23 +619,59 @@ async def triage_alert(
             enrichment["similar_alerts"] = similar_alerts
             logger.info(f"Found {len(similar_alerts['results'])} similar alerts for {alert.alert_id}")
 
-        # Get routing decision from LLM Router
-        route_decision = await get_llm_route_from_router("triage", complexity)
-
         # Build prompts
         system_prompt = get_system_prompt(alert.alert_type)
         user_prompt = build_triage_prompt(alert, enrichment)
 
-        logger.info(f"Triaging alert {alert.alert_id} with model {route_decision.get('model', 'unknown')} (alert_type: {alert.alert_type}, complexity: {complexity})")
-
-        # Call LLM API
-        llm_response = await call_llm_api(
-            prompt=user_prompt,
-            system_prompt=system_prompt,
-            model=route_decision["model"],
-            base_url=route_decision["base_url"],
-            api_key=route_decision["api_key"],
+        logger.info(
+            f"Triaging alert {alert.alert_id} via LLM router "
+            f"(alert_type: {alert.alert_type}, complexity: {complexity})"
         )
+
+        # Call LLM via router (preferred)
+        try:
+            llm_response = await call_llm_via_router(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            provider_used = llm_response.get("provider", "router")
+            model_used = llm_response.get("model", "router")
+        except Exception as router_error:
+            logger.error(f"LLM router call failed, falling back to direct LLM: {router_error}")
+
+            # Fallback priority: Zhipu -> DeepSeek -> Qwen
+            if getattr(config, "zhipu_api_key", None):
+                model_used = getattr(config, "zhipu_model", "glm-4")
+                provider_used = "zhipu"
+                llm_response = await call_llm_api(
+                    prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    model=model_used,
+                    base_url=getattr(config, "zhipu_base_url", "https://open.bigmodel.cn/api/paas/v4"),
+                    api_key=getattr(config, "zhipu_api_key"),
+                )
+            elif getattr(config, "deepseek_api_key", None):
+                model_used = "deepseek-chat"
+                provider_used = "deepseek"
+                llm_response = await call_llm_api(
+                    prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    model=model_used,
+                    base_url=getattr(config, "deepseek_base_url", "https://api.deepseek.com/v1"),
+                    api_key=getattr(config, "deepseek_api_key"),
+                )
+            elif getattr(config, "qwen_api_key", None):
+                model_used = "qwen-plus"
+                provider_used = "qwen"
+                llm_response = await call_llm_api(
+                    prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    model=model_used,
+                    base_url=getattr(config, "qwen_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                    api_key=getattr(config, "qwen_api_key"),
+                )
+            else:
+                raise Exception("No LLM API keys configured for fallback")
 
         # Parse response
         triage_result = await parse_llm_response(llm_response)
@@ -660,8 +685,8 @@ async def triage_alert(
                 "alert_id": alert.alert_id,
                 "triaged_at": end_time.isoformat(),
                 "processing_time_seconds": processing_time,
-                "model_used": route_decision.get("model", "unknown"),
-                "provider_used": route_decision.get("provider", "unknown"),
+                "model_used": model_used,
+                "provider_used": provider_used,
                 "complexity_assessed": complexity,
             }
         )
@@ -870,6 +895,16 @@ async def persist_triage_result_to_db(alert_id: str, triage_result: Dict[str, An
                     "recommended_actions": json.dumps(triage_result.get("recommended_actions", [])),
                     "requires_human_review": triage_result.get("requires_human_review", False),
                 }
+            )
+            await session.execute(
+                text(
+                    """
+                    UPDATE alerts
+                    SET status = :status, updated_at = NOW()
+                    WHERE alert_id = :alert_id
+                    """
+                ),
+                {"alert_id": alert_id, "status": "analyzed"},
             )
             await session.commit()
             logger.debug(f"Triage result persisted for alert {alert_id}")

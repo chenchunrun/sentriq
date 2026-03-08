@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from shared.models.alert import AlertType, SecurityAlert, Severity
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now, utc_now_iso
 
 logger = get_logger(__name__)
 
@@ -143,11 +144,11 @@ class CEFProcessor:
                 cef_data = self._parse_cef_string(raw_alert)
             elif isinstance(raw_alert, dict):
                 # Check if message contains CEF string
-                cef_message = raw_alert.get("message", raw_alert.get("cef_message", ""))
+                cef_message = raw_alert.get("message", raw_alert.get("cef_message", raw_alert.get("raw_message", "")))
                 if cef_message:
                     cef_data = self._parse_cef_string(cef_message)
                     # Merge with additional fields from dict
-                    cef_data.update({k: v for k, v in raw_alert.items() if k not in ["message", "cef_message"]})
+                    cef_data.update({k: v for k, v in raw_alert.items() if k not in ["message", "cef_message", "raw_message"]})
                 else:
                     cef_data = raw_alert
             else:
@@ -162,7 +163,10 @@ class CEFProcessor:
 
             # Extract network information
             source_ip = self._extract_field(cef_data, ["src", "srcAddress", "src_ip", "source_ip"])
-            target_ip = self._extract_field(cef_data, ["dst", "dstAddress", "dest_ip", "destination_ip"])
+            target_ip = self._extract_field(
+                cef_data,
+                ["dst", "dstAddress", "dest_ip", "destination_ip", "target_ip"],
+            )
             source_port = self._extract_port(cef_data, ["srcPort", "src_port", "source_port"])
             destination_port = self._extract_port(cef_data, ["dstPort", "destPort", "dst_port", "destination_port"])
             protocol = self._extract_field(cef_data, ["proto", "protocol"])
@@ -204,7 +208,7 @@ class CEFProcessor:
                 raw_data=raw_alert,
                 normalized_data={
                     "source_type": "cef",
-                    "normalized_at": datetime.utcnow().isoformat(),
+                    "normalized_at": utc_now_iso(),
                     "cef_version": cef_data.get("cef_version", ""),
                     "device_vendor": device_vendor,
                     "device_product": device_product,
@@ -374,7 +378,7 @@ class CEFProcessor:
                         except ValueError:
                             continue
 
-        return datetime.utcnow()
+        return utc_now().replace(tzinfo=None)
 
     def _extract_alert_type(self, cef_data: Dict[str, Any]) -> AlertType:
         """Extract and map alert type from CEF data."""

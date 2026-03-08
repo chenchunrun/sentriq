@@ -4,7 +4,7 @@
 
 import React, { useState, useEffect } from 'react'
 import { api } from '@/lib/api'
-import type { Workflow, WorkflowStatus } from '@/types'
+import type { WorkflowStatus } from '@/types'
 import {
   Play,
   Pause,
@@ -46,10 +46,53 @@ interface WorkflowConfig {
   log_level: 'debug' | 'info' | 'warning' | 'error'
 }
 
+interface AutomationExecutionStep {
+  id: string
+  name: string
+  type: 'manual' | 'automated'
+  error?: string
+}
+
+interface AutomationExecution {
+  id: string
+  name: string
+  description: string
+  status: WorkflowStatus
+  created_at: string
+  completed_at?: string
+  current_step?: number
+  steps: AutomationExecutionStep[]
+  playbook_id: string
+  trigger_alert_id?: string
+}
+
+const normalizeExecution = (execution: any, templates: AutomationTemplate[]): AutomationExecution => {
+  const template = templates.find((item) => item.id === execution.playbook_id)
+  const steps = template?.stepDetails.map((step) => ({
+    id: step.id,
+    name: step.name,
+    type: step.type,
+    error: execution.error,
+  })) || []
+
+  return {
+    id: execution.execution_id,
+    name: template?.name || execution.playbook_id,
+    description: template?.description || `Playbook ${execution.playbook_id}`,
+    status: execution.status,
+    created_at: execution.started_at,
+    completed_at: execution.completed_at,
+    current_step: typeof execution.current_action_index === 'number' ? execution.current_action_index : undefined,
+    steps,
+    playbook_id: execution.playbook_id,
+    trigger_alert_id: execution.trigger_alert_id,
+  }
+}
+
 export const Automation: React.FC = () => {
-  const [workflows, setWorkflows] = useState<Workflow[]>([])
+  const [workflows, setWorkflows] = useState<AutomationExecution[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
+  const [selectedWorkflow, setSelectedWorkflow] = useState<AutomationExecution | null>(null)
   const [selectedTemplate, setSelectedTemplate] = useState<AutomationTemplate | null>(null)
   const [executing, setExecuting] = useState<Record<string, boolean>>({})
   const [showConfigModal, setShowConfigModal] = useState(false)
@@ -79,16 +122,21 @@ export const Automation: React.FC = () => {
     try {
       const templates = await api.workflows.getWorkflowTemplates()
       setAutomationTemplates(templates)
+      return templates
     } catch (error) {
       console.error('Failed to load workflow templates:', error)
+      return []
     }
   }
 
   const loadWorkflows = async () => {
     try {
       setLoading(true)
-      const data = await api.workflows.getWorkflows()
-      setWorkflows(data)
+      const [executions, templates] = await Promise.all([
+        api.workflows.getAutomationExecutions(),
+        automationTemplates.length > 0 ? Promise.resolve(automationTemplates) : loadTemplates(),
+      ])
+      setWorkflows(executions.map((item: any) => normalizeExecution(item, templates)))
     } catch (error) {
       console.error('Failed to load workflows:', error)
     } finally {
@@ -139,15 +187,23 @@ export const Automation: React.FC = () => {
     }
   }
 
-  const executeWorkflow = async (workflowId: string) => {
+  const executeWorkflow = async (executionId: string, action: 'cancel' | 'retry') => {
     try {
-      setExecuting((prev) => ({ ...prev, [workflowId]: true }))
-      await api.workflows.executeWorkflowAction(workflowId, 'start')
+      setExecuting((prev) => ({ ...prev, [executionId]: true }))
+      const execution = workflows.find((item) => item.id === executionId)
+      if (!execution) {
+        return
+      }
+      if (action === 'cancel') {
+        await api.workflows.cancelAutomationExecution(executionId)
+      } else {
+        await api.workflows.executeFromTemplate(execution.playbook_id, config)
+      }
       await loadWorkflows()
     } catch (error) {
       console.error('Failed to execute workflow:', error)
     } finally {
-      setExecuting((prev) => ({ ...prev, [workflowId]: false }))
+      setExecuting((prev) => ({ ...prev, [executionId]: false }))
     }
   }
 
@@ -503,7 +559,7 @@ export const Automation: React.FC = () => {
             <div className="flex items-center gap-3 pt-4 border-t border-gray-200">
               {selectedWorkflow.status === 'running' && (
                 <button
-                  onClick={() => executeWorkflow(selectedWorkflow.id)}
+                  onClick={() => executeWorkflow(selectedWorkflow.id, 'cancel')}
                   className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
                 >
                   <Pause className="w-4 h-4" />
@@ -512,7 +568,7 @@ export const Automation: React.FC = () => {
               )}
               {(selectedWorkflow.status === 'failed' || selectedWorkflow.status === 'cancelled') && (
                 <button
-                  onClick={() => executeWorkflow(selectedWorkflow.id)}
+                  onClick={() => executeWorkflow(selectedWorkflow.id, 'retry')}
                   disabled={executing[selectedWorkflow.id]}
                   className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
                 >

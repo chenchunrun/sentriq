@@ -463,6 +463,44 @@ class CustomThreatFeed(ThreatIntelSource):
         }
 
 
+# Mock source to avoid third-party calls in dev/test
+class MockThreatIntelSource(ThreatIntelSource):
+    """Deterministic mock threat intel source."""
+
+    def __init__(self):
+        super().__init__("MockThreatIntel")
+
+    async def query_ip(self, ip: str) -> Optional[Dict[str, Any]]:
+        detected = ip.startswith(("45.", "203.0.113.", "198.51.100."))
+        return {
+            "source": "MockThreatIntel",
+            "detected": detected,
+            "positives": 1 if detected else 0,
+            "confidence": 0.7 if detected else 0.2,
+            "_mock": True,
+        }
+
+    async def query_hash(self, file_hash: str) -> Optional[Dict[str, Any]]:
+        detected = file_hash.lower().startswith(("5e88", "e3b0", "d41d8"))
+        return {
+            "source": "MockThreatIntel",
+            "detected": detected,
+            "positives": 1 if detected else 0,
+            "confidence": 0.7 if detected else 0.2,
+            "_mock": True,
+        }
+
+    async def query_url(self, url: str) -> Optional[Dict[str, Any]]:
+        detected = "malicious" in url or "phish" in url
+        return {
+            "source": "MockThreatIntel",
+            "detected": detected,
+            "positives": 1 if detected else 0,
+            "confidence": 0.7 if detected else 0.2,
+            "_mock": True,
+        }
+
+
 # Initialize threat intel sources
 threat_sources: List[ThreatIntelSource] = []
 
@@ -470,6 +508,16 @@ threat_sources: List[ThreatIntelSource] = []
 def init_threat_sources():
     """Initialize threat intelligence sources from config."""
     global threat_sources
+    threat_sources = []
+
+    mock_mode = os.getenv("THREAT_INTEL_MOCK_MODE", "true").lower() == "true"
+    if mock_mode:
+        threat_sources.append(MockThreatIntelSource())
+        threat_sources.append(InternalIOCSource())
+        threat_sources.append(CustomThreatFeed())
+        logger.info("Threat intel mock mode enabled (external APIs disabled)")
+        logger.info(f"Initialized {len(threat_sources)} threat intel sources")
+        return
 
     # VirusTotal (requires API key)
     vt_api_key = os.getenv("VIRUSTOTAL_API_KEY", "your_vt_key")
@@ -758,7 +806,7 @@ async def persist_threat_intel_to_db(alert: SecurityAlert, enrichment: Dict[str,
                                                       detection_rate, positives, total, raw_data)
                             VALUES (:ioc, :ioc_type, :threat_level, :confidence_score,
                                     :source, :description, :first_seen, :last_seen,
-                                    :detection_rate, :positives, :total, :raw_data)
+                                    :detection_rate, :positives, :total, :raw_data::jsonb)
                             ON CONFLICT (ioc, ioc_type) DO UPDATE SET
                                 threat_level = EXCLUDED.threat_level,
                                 confidence_score = EXCLUDED.confidence_score,
@@ -791,7 +839,7 @@ async def persist_threat_intel_to_db(alert: SecurityAlert, enrichment: Dict[str,
                             INSERT INTO threat_intel (ioc, ioc_type, threat_level, confidence_score,
                                                       source, description, detection_rate, positives, total, raw_data)
                             VALUES (:ioc, :ioc_type, :threat_level, :confidence_score,
-                                    :source, :description, :detection_rate, :positives, :total, :raw_data)
+                                    :source, :description, :detection_rate, :positives, :total, :raw_data::jsonb)
                             ON CONFLICT (ioc, ioc_type) DO UPDATE SET
                                 threat_level = EXCLUDED.threat_level,
                                 confidence_score = EXCLUDED.confidence_score,
@@ -821,7 +869,7 @@ async def persist_threat_intel_to_db(alert: SecurityAlert, enrichment: Dict[str,
                             INSERT INTO threat_intel (ioc, ioc_type, threat_level, confidence_score,
                                                       source, description, detection_rate, positives, total, raw_data)
                             VALUES (:ioc, :ioc_type, :threat_level, :confidence_score,
-                                    :source, :description, :detection_rate, :positives, :total, :raw_data)
+                                    :source, :description, :detection_rate, :positives, :total, :raw_data::jsonb)
                             ON CONFLICT (ioc, ioc_type) DO UPDATE SET
                                 threat_level = EXCLUDED.threat_level,
                                 confidence_score = EXCLUDED.confidence_score,
@@ -842,6 +890,40 @@ async def persist_threat_intel_to_db(alert: SecurityAlert, enrichment: Dict[str,
                         }
                     )
 
+            # Persist aggregated threat intel as alert context
+            if threat_data:
+                await session.execute(
+                    text(
+                        "DELETE FROM alert_context WHERE alert_id = :alert_id AND context_type = :context_type"
+                    ),
+                    {"alert_id": alert.alert_id, "context_type": "threat_intel"},
+                )
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO alert_context (alert_id, context_type, context_data, source, confidence_score)
+                        VALUES (:alert_id, :context_type, :context_data::jsonb, :source, :confidence_score)
+                        """
+                    ),
+                    {
+                        "alert_id": alert.alert_id,
+                        "context_type": "threat_intel",
+                        "context_data": json.dumps(threat_data),
+                        "source": "threat-intel-aggregator",
+                        "confidence_score": 0.8,
+                    },
+                )
+
+            await session.execute(
+                text(
+                    """
+                    UPDATE alerts
+                    SET status = :status, updated_at = NOW()
+                    WHERE alert_id = :alert_id
+                    """
+                ),
+                {"alert_id": alert.alert_id, "status": "analyzing"},
+            )
             await session.commit()
             logger.debug(f"Threat intel persisted for alert {alert.alert_id}")
 

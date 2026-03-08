@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from shared.utils.time import utc_now
 
 
 class MetricType(str, Enum):
@@ -52,9 +53,15 @@ class AlertMetric(BaseModel):
         default_factory=dict, description="Alerts by severity level"
     )
     by_type: Dict[str, int] = Field(default_factory=dict, description="Alerts by alert type")
+    by_status: Dict[str, int] = Field(default_factory=dict, description="Alerts by status")
     triaged: int = Field(..., ge=0, description="Number of triaged alerts")
     auto_closed: int = Field(..., ge=0, description="Auto-closed alerts")
     human_reviewed: int = Field(..., ge=0, description="Human-reviewed alerts")
+    avg_resolution_time: float = Field(
+        default=0.0, ge=0.0, description="Average resolution time (minutes)"
+    )
+    mtta: float = Field(default=0.0, ge=0.0, description="Mean time to acknowledge (minutes)")
+    mttr: float = Field(default=0.0, ge=0.0, description="Mean time to resolve (minutes)")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -189,7 +196,7 @@ class DashboardData(BaseModel):
         default_factory=list, description="Top alerts by various criteria"
     )
     generated_at: datetime = Field(
-        default_factory=datetime.utcnow, description="When dashboard was generated"
+        default_factory=utc_now, description="When dashboard was generated"
     )
 
     model_config = ConfigDict(

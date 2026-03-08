@@ -19,7 +19,6 @@ Provides REST endpoints for alert CRUD operations, filtering,
 status updates, and triage management.
 """
 
-from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
@@ -53,7 +52,19 @@ from models.responses import (
     PaginatedResponse,
     TriageResultResponse,
 )
+from routes.auth import require_permissions
+from shared.utils.time import utc_now
+
 router = APIRouter()
+SUPPORTED_ALERT_STATUSES = {
+    "pending",
+    "analyzing",
+    "analyzed",
+    "investigating",
+    "resolved",
+    "false_positive",
+    "suppressed",
+}
 
 
 # =============================================================================
@@ -75,23 +86,23 @@ def alert_to_response(alert: Alert) -> AlertResponse:
     """Convert Alert model to AlertResponse."""
     return AlertResponse(
         alert_id=alert.alert_id,
-        timestamp=alert.timestamp,
+        timestamp=getattr(alert, "timestamp", None) or alert.received_at,
         alert_type=alert.alert_type,
         severity=alert.severity,
         status=alert.status,
         title=alert.title,
         description=alert.description,
-        source_ip=alert.source_ip,
-        destination_ip=alert.destination_ip,
+        source_ip=str(alert.source_ip) if alert.source_ip else None,
+        destination_ip=str(alert.destination_ip) if alert.destination_ip else None,
         file_hash=alert.file_hash,
         url=alert.url,
         asset_id=alert.asset_id,
         user_id=alert.user_id,
-        risk_score=alert.risk_score,
-        confidence=alert.confidence,
-        assigned_to=str(alert.assigned_to) if alert.assigned_to else None,
-        source=alert.source,
-        tags=alert.tags or [],
+        risk_score=getattr(alert, "risk_score", None),
+        confidence=getattr(alert, "confidence", None),
+        assigned_to=str(getattr(alert, "assigned_to", "")) if getattr(alert, "assigned_to", None) else None,
+        source=getattr(alert, "source", None),
+        tags=getattr(alert, "tags", None) or [],
         created_at=alert.created_at,
         updated_at=alert.updated_at,
     )
@@ -125,9 +136,10 @@ async def get_alert_with_details(
 
     # Get triage result
     triage_result = None
-    if alert.triage_result_id:
+    triage_result_id = getattr(alert, "triage_result_id", None)
+    if triage_result_id:
         triage_result = await session.execute(
-            select(TriageResult).where(TriageResult.id == alert.triage_result_id)
+            select(TriageResult).where(TriageResult.id == triage_result_id)
         )
         triage_result = triage_result.scalar_one_or_none()
 
@@ -155,8 +167,9 @@ async def list_alerts(
     search: Optional[str] = Query(None, description="Text search"),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(100, ge=1, le=1000, description="Max records to return"),
-    sort_by: str = Query("timestamp", description="Field to sort by"),
+    sort_by: str = Query("received_at", description="Field to sort by"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$", description="Sort order"),
+    current_user=Depends(require_permissions("alerts:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -227,6 +240,7 @@ async def list_alerts(
 )
 async def get_alert(
     alert_id: str,
+    current_user=Depends(require_permissions("alerts:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -276,6 +290,7 @@ async def get_alert(
 )
 async def create_alert(
     alert_data: AlertCreateRequest,
+    current_user=Depends(require_permissions("alerts:write")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -292,10 +307,10 @@ async def create_alert(
     # Prepare alert data
     alert_dict = {
         "alert_id": alert_id,
-        "timestamp": datetime.utcnow(),
+        "received_at": utc_now(),
         "alert_type": alert_data.alert_type,
         "severity": alert_data.severity,
-        "status": "new",
+        "status": "pending",
         "title": alert_data.title,
         "description": alert_data.description,
         "source_ip": alert_data.source_ip,
@@ -304,12 +319,16 @@ async def create_alert(
         "url": alert_data.url,
         "asset_id": alert_data.asset_id,
         "user_id": alert_data.user_id,
-        "source": alert_data.source,
-        "raw_data": alert_data.raw_data,
+        "raw_data": {
+            **(alert_data.raw_data or {}),
+            **({"source": alert_data.source} if alert_data.source else {}),
+        } or None,
     }
 
     # Create alert
     alert = await repo.create_alert(alert_dict)
+    await session.commit()
+    await session.refresh(alert)
 
     logger.info(
         "Alert created via API",
@@ -332,6 +351,7 @@ async def create_alert(
 async def update_alert_status(
     alert_id: str,
     status_update: AlertStatusUpdateRequest,
+    current_user=Depends(require_permissions("alerts:write")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -345,10 +365,8 @@ async def update_alert_status(
     """
     repo = AlertRepository(session)
 
-    # Validate status
-    try:
-        status = AlertStatus(status_update.status)
-    except ValueError:
+    status_value = status_update.status.strip().lower()
+    if status_value not in SUPPORTED_ALERT_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid status: {status_update.status}",
@@ -357,7 +375,7 @@ async def update_alert_status(
     # Update status
     alert = await repo.update_alert_status(
         alert_id=alert_id,
-        status=status,
+        status=status_value,
         assigned_to=status_update.assigned_to,
         comment=status_update.comment,
     )
@@ -372,7 +390,7 @@ async def update_alert_status(
         "Alert status updated",
         extra={
             "alert_id": alert_id,
-            "new_status": status.value,
+            "new_status": status_value,
         },
     )
 
@@ -390,6 +408,7 @@ async def update_alert_status(
     description="Retrieve alert statistics and counts",
 )
 async def get_alert_stats(
+    current_user=Depends(require_permissions("alerts:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -440,6 +459,7 @@ async def get_alert_stats(
 async def get_high_priority_alerts(
     min_risk_score: float = Query(70.0, ge=0, le=100, description="Minimum risk score"),
     limit: int = Query(100, ge=1, le=1000, description="Max results"),
+    current_user=Depends(require_permissions("alerts:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -468,6 +488,7 @@ async def get_high_priority_alerts(
 )
 async def get_active_alerts(
     limit: int = Query(100, ge=1, le=1000, description="Max results"),
+    current_user=Depends(require_permissions("alerts:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -492,6 +513,7 @@ async def get_active_alerts(
 )
 async def bulk_action(
     action_request: AlertBulkActionRequest,
+    current_user=Depends(require_permissions("alerts:write")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """
@@ -563,6 +585,7 @@ async def bulk_action(
 )
 async def get_triage_result(
     alert_id: str,
+    current_user=Depends(require_permissions("triage:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """

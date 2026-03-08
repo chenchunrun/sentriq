@@ -266,7 +266,7 @@ class TriageRepository(BaseRepository[TriageResult]):
             .where(
                 and_(
                     TriageResult.requires_human_review == True,
-                    TriageResult.reviewed_by.is_(None),
+                    TriageResult.reviewed_at.is_(None),
                 )
             )
             .order_by(TriageResult.risk_score.desc())
@@ -461,7 +461,7 @@ class TriageRepository(BaseRepository[TriageResult]):
             select(func.count(TriageResult.id)).where(
                 and_(
                     TriageResult.requires_human_review == True,
-                    TriageResult.reviewed_by.is_(None),
+                    TriageResult.reviewed_at.is_(None),
                 )
             )
         )

@@ -19,6 +19,9 @@ asyncpg>=0.29.0
 # Message Queue
 aio-pika>=9.3.0
 
+# Cache
+redis[hiredis]>=4.6.0
+
 # Logging
 loguru>=0.7.0
 

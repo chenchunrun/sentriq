@@ -21,12 +21,13 @@ reliable message processing, automatic retries, and dead letter queue handling.
 
 import asyncio
 import json
-from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from aio_pika import DeliveryMode, ExchangeType, RobustConnection, connect_robust
 from aio_pika.abc import AbstractChannel, AbstractQueue, AbstractExchange
+from aio_pika.exceptions import QueueEmpty
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now
 
 logger = get_logger(__name__)
 
@@ -121,6 +122,7 @@ class MessageConsumer:
                     "x-dead-letter-routing-key": self.dlq_name,
                     "x-max-length": 100000,  # Max 100k messages
                     "x-message-ttl": 86400000,  # 24 hours TTL
+                    "x-max-priority": 10,
                 },
             )
 
@@ -149,13 +151,22 @@ class MessageConsumer:
         self._is_consuming = True
         logger.info(f"Started consuming from {self.queue_name}")
 
-        async with self.queue.iterator(no_ack=self.auto_ack) as queue_iter:
-            async for message in queue_iter:
-                if self._shutdown_event.is_set():
-                    logger.info("Shutdown signal received, stopping consumption")
-                    break
+        while not self._shutdown_event.is_set():
+            try:
+                message = await self.queue.get(
+                    no_ack=self.auto_ack,
+                    fail=False,
+                    timeout=1.0,
+                )
+            except QueueEmpty:
+                continue
 
-                await self._process_message(message, callback, error_callback)
+            if message is None:
+                continue
+
+            await self._process_message(message, callback, error_callback)
+
+        logger.info("Shutdown signal received, stopping consumption")
 
     async def _process_message(
         self,
@@ -276,14 +287,13 @@ class MessageConsumer:
             await self.connect()
 
         # Get queue info
-        queue_info = await self.channel.queue_declare(
+        underlay_channel = await self.channel.get_underlay_channel()
+        queue_result = await underlay_channel.queue_declare(
             self.queue_name,
             durable=True,
             passive=True,
         )
-
-        # Get DLQ info
-        dlq_info = await self.channel.queue_declare(
+        dlq_result = await underlay_channel.queue_declare(
             self.dlq_name,
             durable=True,
             passive=True,
@@ -291,10 +301,10 @@ class MessageConsumer:
 
         return {
             "queue": self.queue_name,
-            "message_count": queue_info.message_count,
-            "consumer_count": queue_info.consumer_count,
+            "message_count": queue_result.message_count,
+            "consumer_count": queue_result.consumer_count,
             "dlq": self.dlq_name,
-            "dlq_message_count": dlq_info.message_count,
+            "dlq_message_count": dlq_result.message_count,
             "is_consuming": self._is_consuming,
         }
 
@@ -308,7 +318,7 @@ class MessageConsumer:
         if not self.dlq:
             await self.connect()
 
-        result = await self.channel.queue_purge(self.dlq_name)
+        result = await self.dlq.purge()
         logger.info(f"Purged {result} messages from DLQ: {self.dlq_name}")
         return result
 
@@ -419,7 +429,7 @@ class BatchConsumer(MessageConsumer):
         self.batch_size = batch_size
         self.batch_timeout_ms = batch_timeout_ms
         self._message_buffer: List[Dict[str, Any]] = []
-        self._last_process_time = datetime.utcnow()
+        self._last_process_time = utc_now()
 
     async def consume(
         self,
@@ -441,36 +451,55 @@ class BatchConsumer(MessageConsumer):
             f"Started batch consuming from {self.queue_name} (batch_size: {self.batch_size})"
         )
 
-        async with self.queue.iterator(no_ack=self.auto_ack) as queue_iter:
-            async for message in queue_iter:
-                if self._shutdown_event.is_set():
-                    break
+        while not self._shutdown_event.is_set():
+            try:
+                message = await self.queue.get(
+                    no_ack=self.auto_ack,
+                    fail=False,
+                    timeout=1.0,
+                )
+            except QueueEmpty:
+                message = None
 
-                try:
-                    # Parse and buffer message
-                    body = json.loads(message.body.decode())
-                    self._message_buffer.append(body)
+            now = utc_now()
+            batch_timed_out = (
+                self._message_buffer
+                and (now - self._last_process_time).total_seconds() * 1000 >= self.batch_timeout_ms
+            )
 
-                    if not self.auto_ack:
-                        await message.ack()
+            if message is None:
+                if batch_timed_out:
+                    await self._process_batch(callback, error_callback)
+                    self._message_buffer = []
+                    self._last_process_time = now
+                continue
 
-                    # Check if batch is ready
-                    should_process = (
-                        len(self._message_buffer) >= self.batch_size
-                        or (datetime.utcnow() - self._last_process_time).total_seconds()
-                        * 1000
-                        >= self.batch_timeout_ms
-                    )
+            try:
+                body = json.loads(message.body.decode())
+                self._message_buffer.append(body)
 
-                    if should_process and self._message_buffer:
-                        await self._process_batch(callback, error_callback)
-                        self._message_buffer = []
-                        self._last_process_time = datetime.utcnow()
+                if not self.auto_ack:
+                    await message.ack()
 
-                except Exception as e:
-                    logger.error(f"Error in batch consumption: {e}")
-                    if not self.auto_ack:
-                        await message.nack(requeue=False)
+                should_process = (
+                    len(self._message_buffer) >= self.batch_size
+                    or (utc_now() - self._last_process_time).total_seconds() * 1000
+                    >= self.batch_timeout_ms
+                )
+
+                if should_process and self._message_buffer:
+                    await self._process_batch(callback, error_callback)
+                    self._message_buffer = []
+                    self._last_process_time = utc_now()
+
+            except Exception as e:
+                logger.error(f"Error in batch consumption: {e}")
+                if not self.auto_ack:
+                    await message.nack(requeue=False)
+
+        if self._message_buffer:
+            await self._process_batch(callback, error_callback)
+            self._message_buffer = []
 
     async def _process_batch(
         self,

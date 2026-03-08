@@ -556,7 +556,7 @@ def create_admin_user() -> User:
     Returns:
         Created admin user
     """
-    admin_password = os.getenv("INITIAL_ADMIN_PASSWORD", "Admin123!")
+    admin_password = os.getenv("INITIAL_ADMIN_PASSWORD", "admin123")
 
     user = User(
         id="admin",

@@ -1,5 +1,176 @@
 # Security Alert Triage System - Complete Architecture Diagram
 
+## Current Repository Architecture (2026-03-08)
+
+This section reflects the actual service layout and message flow implemented in the
+current repository. The historical diagrams below remain useful as design intent,
+but they are no longer the sole source of truth.
+
+### Current End-to-End Architecture
+
+```mermaid
+flowchart LR
+    U["Security Devices / SIEM / EDR / Email Gateway / Manual Submission"] --> G["API Gateway"]
+    A["Web Dashboard"] --> G
+
+    G --> ING["Alert Ingestor"]
+    ING --> NOR["Alert Normalizer"]
+    NOR --> MQ["RabbitMQ"]
+
+    MQ --> CTX["Context Collector"]
+    MQ --> TI["Threat Intel Aggregator"]
+    MQ --> TRI["AI Triage Agent"]
+    MQ --> WF["Workflow Engine"]
+    MQ --> AUTO["Automation Orchestrator"]
+    MQ --> NOTI["Notification Service"]
+    MQ --> ANA["Data Analytics"]
+    MQ --> REP["Reporting Service"]
+    MQ --> ATT["Attack Chain Analyzer"]
+    MQ --> SIM["Similarity Search"]
+
+    TRI --> LLM["LLM Router"]
+    LLM --> MODELS["DeepSeek / Qwen / Zhipu / OpenAI-Compatible Models"]
+
+    CTX --> PG["PostgreSQL"]
+    TRI --> PG
+    WF --> PG
+    ANA --> PG
+    REP --> PG
+
+    TI --> REDIS["Redis"]
+    TRI --> SIM
+    SIM --> CHROMA["ChromaDB"]
+
+    MON["Monitoring Metrics"] --> PROM["Prometheus / Grafana"]
+```
+
+### Current Functional Flow
+
+```mermaid
+flowchart TD
+    S1["1. Alert Ingestion"] --> S2["2. Alert Normalization"]
+    S2 --> S3["3. Message Bus Distribution"]
+    S3 --> S4["4. Context Collection"]
+    S3 --> S5["5. Threat Intel Aggregation"]
+    S4 --> S6["6. AI Triage"]
+    S5 --> S6
+    S6 --> S7["7. Similarity Search"]
+    S6 --> S8["8. Risk Score / Findings / Actions"]
+    S8 --> S9["9. Workflow Execution"]
+    S9 --> S10["10. Automation / Notification / Reporting"]
+    S8 --> S11["11. Dashboard / Human Review"]
+```
+
+### Current Capability Map
+
+```mermaid
+mindmap
+  root((Security Alert Triage System))
+    Alert Ingestion
+      REST API
+      Webhook
+      Batch ingest
+      Multiple alert sources
+    Alert Processing
+      Field mapping
+      Normalization
+      IOC extraction
+      Deduplication
+    Enrichment
+      Context collection
+      Threat intelligence
+      Similar alert retrieval
+      Attack chain analysis
+    AI Triage
+      Model routing
+      Risk scoring
+      Findings
+      Recommended actions
+      Human review flag
+    Orchestration
+      Workflow execution
+      Automation playbooks
+      Action approval
+    Support Services
+      Notifications
+      Reporting
+      Analytics
+      Configuration
+      Monitoring
+    Presentation
+      Dashboard
+      Alert details
+      Workflow views
+      Trends
+      Settings
+```
+
+## Architecture Fit Assessment (2026-03-08)
+
+### Summary
+
+| Area | Status | Assessment |
+|------|--------|------------|
+| Core ingestion pipeline | Implemented | Ingestor, normalizer, enrichment, triage, and queue flow exist and are tested |
+| Message-driven architecture | Implemented | RabbitMQ publisher/consumer paths are present and integration-tested |
+| Vector similarity search | Implemented | ChromaDB-backed similarity service exists with indexing and query APIs |
+| Multi-provider LLM routing | Implemented | Router supports DeepSeek, Qwen, Zhipu, and model capability-based routing |
+| Workflow and automation | Partially implemented | Workflow engine and automation orchestrator exist, and the workflow service now includes a Temporal-backed execution path with local fallback |
+| Notifications | Partially implemented | Service and channels exist, but some channels remain mock/TODO |
+| Configuration management | Partially implemented | Configuration state is now persisted in the database, but cross-service config propagation is still incomplete |
+| Analytics and reporting | Partially implemented | Main metrics and report metadata are now persisted or derived from the database, but the full analytics platform is still below the original production design |
+| Security and auth | Partially implemented | API gateway now has database-backed JWT auth, role-derived permissions, and enforced protection on core alert/analytics routes, but full RBAC coverage is still incomplete across all route groups |
+| Observability | Partially implemented | Health/metrics endpoints exist, but full tracing/logging platform is not wired end-to-end |
+
+### What Clearly Matches The Architecture
+
+- The repository does implement the intended microservice split across ingestion, enrichment,
+  AI analysis, workflow, support, and presentation layers.
+- The main asynchronous alert pipeline is real rather than only documented:
+  `alert.raw -> alert.normalized -> alert.enriched -> alert.result`.
+- Shared models, messaging, and database layers are used consistently across services.
+- Similarity search, threat intelligence aggregation, and AI triage are not placeholders;
+  they have working code paths and passing tests.
+
+### What Is Only Partially Aligned
+
+- The workflow layer now has a Temporal integration path, but the service still keeps
+  a local execution fallback and has not fully migrated all orchestration semantics to Temporal.
+- Notification, reporting, analytics, and configuration services are present, but some
+  surrounding production behaviors such as event propagation, scheduling, and channel completeness are still unfinished.
+- Monitoring exists as a service-level implementation, but the broader observability stack
+  described in the historical design is not fully realized in code.
+
+### Main Gaps Against The Original Architecture Design
+
+1. JWT auth and permission derivation exist, and core alert/analytics routes are now enforced, but route-wide coverage and richer RBAC policy granularity are still incomplete.
+2. Centralized configuration is now persisted, but not yet fully event-driven across services.
+3. Workflow orchestration has a Temporal-backed path, but not all executions and activities are migrated to it yet.
+4. Observability is serviceable for development, but below the original production design target.
+5. Some support-channel integrations remain mocked rather than fully operational.
+
+### Evidence Pointers
+
+- Core ingestion and queue flow:
+  - `services/alert_ingestor/main.py`
+  - `services/alert_normalizer/main.py`
+  - `services/context_collector/main.py`
+  - `services/ai_triage_agent/main.py`
+- Routing and similarity:
+  - `services/llm_router/main.py`
+  - `services/similarity_search/main.py`
+- Workflow and automation:
+  - `services/workflow_engine/main.py`
+  - `services/automation_orchestrator/main.py`
+- Support services:
+  - `services/notification_service/main.py`
+  - `services/reporting_service/main.py`
+  - `services/data_analytics/main.py`
+  - `services/configuration_service/main.py`
+  - `services/monitoring_metrics/main.py`
+- Security/auth:
+  - `services/api_gateway/routes/auth.py`
+
 ## System Overview
 
 ```

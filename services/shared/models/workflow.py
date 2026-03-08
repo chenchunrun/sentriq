@@ -21,13 +21,25 @@ workflow states, tasks, and automation playbooks.
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from shared.utils.time import utc_now
 
 
 class WorkflowStatus(str, Enum):
     """Workflow execution status."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+
+
+class PlaybookStatus(str, Enum):
+    """Backward-compatible playbook execution status."""
 
     PENDING = "pending"
     RUNNING = "running"
@@ -127,7 +139,7 @@ class WorkflowExecution(BaseModel):
 
     # Timestamps
     started_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Execution start time"
+        default_factory=utc_now, description="Execution start time"
     )
     completed_at: Optional[datetime] = Field(default=None, description="Execution completion time")
 
@@ -180,7 +192,7 @@ class HumanTask(BaseModel):
 
     # Dates
     due_date: Optional[datetime] = Field(default=None, description="Task due date")
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="Task creation time")
+    created_at: datetime = Field(default_factory=utc_now, description="Task creation time")
     completed_at: Optional[datetime] = Field(default=None, description="Task completion time")
 
     # Task data
@@ -223,8 +235,10 @@ class PlaybookAction(BaseModel):
 
     action_id: str = Field(..., description="Unique action identifier")
     action_type: str = Field(..., description="Type of action")
-    name: str = Field(..., min_length=1, max_length=200, description="Action name")
-    description: str = Field(..., min_length=1, max_length=1000, description="Action description")
+    name: str = Field(default="action", min_length=1, max_length=200, description="Action name")
+    description: str = Field(
+        default="Automation action", min_length=1, max_length=1000, description="Action description"
+    )
 
     # Configuration
     parameters: dict[str, Any] = Field(default_factory=dict, description="Action parameters")
@@ -235,6 +249,7 @@ class PlaybookAction(BaseModel):
     conditions: list[dict[str, Any]] = Field(
         default_factory=list, description="Execution conditions"
     )
+    status: Optional[str] = Field(default=None, description="Backward-compatible action status")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -331,7 +346,7 @@ class PlaybookExecution(BaseModel):
     execution_id: str = Field(..., description="Unique execution identifier")
     playbook_id: str = Field(..., description="Playbook definition ID")
     trigger_alert_id: str = Field(..., description="Alert that triggered execution")
-    status: WorkflowStatus = Field(..., description="Execution status")
+    status: PlaybookStatus = Field(..., description="Execution status")
 
     # Progress
     current_action_index: int = Field(default=0, ge=0, description="Current action index")
@@ -341,6 +356,10 @@ class PlaybookExecution(BaseModel):
     results: list[dict[str, Any]] = Field(
         default_factory=list, description="Action execution results"
     )
+    actions: list[PlaybookAction] = Field(
+        default_factory=list, description="Backward-compatible actions snapshot"
+    )
+    input_data: Dict[str, Any] = Field(default_factory=dict, description="Execution input data")
 
     # Approval
     approval_status: Optional[str] = Field(
@@ -350,7 +369,7 @@ class PlaybookExecution(BaseModel):
 
     # Timestamps
     started_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Execution start time"
+        default_factory=utc_now, description="Execution start time"
     )
     completed_at: Optional[datetime] = Field(default=None, description="Execution completion time")
 

@@ -20,7 +20,7 @@ including CRUD operations, filtering, relationships, and transactions.
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import AsyncGenerator, Dict, List
 from uuid import uuid4
 
@@ -51,6 +51,7 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 @pytest.fixture(scope="function")
 async def test_engine():
     """Create test database engine."""
+    pytest.importorskip("aiosqlite", reason="aiosqlite is required for sqlite async integration tests")
     engine = create_async_engine(
         TEST_DATABASE_URL,
         echo=False,
@@ -104,7 +105,7 @@ def sample_alert_data() -> Dict:
     """Sample alert data for testing."""
     return {
         "alert_id": f"alert-{uuid4()}",
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(UTC),
         "alert_type": "malware",
         "severity": "high",
         "status": "new",
@@ -175,7 +176,7 @@ class TestDatabaseConnection:
         async with db_manager.get_session() as session:
             alert = Alert(
                 alert_id="test-commit-001",
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 alert_type="malware",
                 severity="high",
                 status="new",
@@ -198,7 +199,7 @@ class TestDatabaseConnection:
         async with db_manager.get_session() as session:
             alert = Alert(
                 alert_id="test-rollback-001",
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 alert_type="malware",
                 severity="high",
                 status="new",
@@ -370,7 +371,7 @@ class TestAlertRepository:
 
         await repo.create_alert(sample_alert_data)
 
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
         filters = AlertFilter(
             start_date=now - timedelta(hours=1),
             end_date=now + timedelta(hours=1),

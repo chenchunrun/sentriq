@@ -21,7 +21,9 @@ to a standard format, extracts IOCs, and publishes normalized alerts.
 
 import asyncio
 import hashlib
+import json
 import os
+import re
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -30,6 +32,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from shared.database import DatabaseManager, close_database, get_database_manager, init_database
 from shared.messaging import BatchConsumer, MessageConsumer, MessagePublisher
 from shared.models import (
@@ -39,7 +42,7 @@ from shared.models import (
     Severity,
     SuccessResponse,
 )
-from shared.utils import Config, get_logger
+from shared.utils import Config, get_logger, utc_now, utc_now_iso
 
 # Import processors
 from services.alert_normalizer.processors import (
@@ -291,7 +294,7 @@ def normalize_alert(raw_alert: dict, source_type: str = "default") -> SecurityAl
             normalized_alert.normalized_data = {}
 
         normalized_alert.normalized_data["source_type"] = source_type
-        normalized_alert.normalized_data["normalized_at"] = datetime.utcnow().isoformat()
+        normalized_alert.normalized_data["normalized_at"] = utc_now_iso()
 
         logger.debug(f"Alert normalized successfully (alert_id: {normalized_alert.alert_id}, source_type: {source_type}, processor: {processor.__class__.__name__}, alert_type: {normalized_alert.alert_type.value})")
 
@@ -442,7 +445,7 @@ class AlertAggregator:
             Batch of alerts if ready to publish, None otherwise
         """
         batch_key = self._get_batch_key(alert)
-        current_time = datetime.utcnow()
+        current_time = utc_now().replace(tzinfo=None)
 
         # Initialize batch if needed
         if batch_key not in self.batches:
@@ -500,11 +503,12 @@ class AlertAggregator:
         }
 
 
-# Global aggregator instance
-# TODO: Make these configurable via environment variables or config file
+# Global aggregator instance (configurable)
+aggregation_window = int(os.getenv("ALERT_AGG_WINDOW_SECONDS", "30"))
+aggregation_max_size = int(os.getenv("ALERT_AGG_MAX_SIZE", "100"))
 aggregator = AlertAggregator(
-    window_seconds=30,  # Default 30-second aggregation window
-    max_batch_size=100,  # Default max batch size
+    window_seconds=aggregation_window,
+    max_batch_size=aggregation_max_size,
 )
 
 
@@ -562,6 +566,92 @@ async def consume_alerts():
     await consumer.consume(process_message)
 
 
+async def persist_normalized_alert(
+    alert: SecurityAlert,
+    original_message_id: str,
+    source_type: str,
+):
+    """
+    Persist normalized alert details to database.
+
+    Uses UPSERT to ensure alerts inserted by ingestor are updated.
+    """
+    normalized_payload = {
+        "normalized_data": alert.normalized_data or {},
+        "source": source_type,
+        "source_ref": original_message_id,
+        "normalized_at": utc_now_iso(),
+    }
+
+    raw_payload = alert.raw_data if alert.raw_data else {}
+    merged_raw = {**raw_payload, **normalized_payload}
+
+    async with db_manager.get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO alerts (
+                    alert_id,
+                    received_at,
+                    alert_type,
+                    severity,
+                    description,
+                    source_ip,
+                    destination_ip,
+                    file_hash,
+                    url,
+                    asset_id,
+                    user_name,
+                    raw_data,
+                    status
+                ) VALUES (
+                    :alert_id,
+                    :received_at,
+                    :alert_type,
+                    :severity,
+                    :description,
+                    :source_ip,
+                    :destination_ip,
+                    :file_hash,
+                    :url,
+                    :asset_id,
+                    :user_name,
+                    :raw_data::jsonb,
+                    :status
+                )
+                ON CONFLICT (alert_id) DO UPDATE SET
+                    alert_type = EXCLUDED.alert_type,
+                    severity = EXCLUDED.severity,
+                    description = EXCLUDED.description,
+                    source_ip = EXCLUDED.source_ip,
+                    destination_ip = EXCLUDED.destination_ip,
+                    file_hash = EXCLUDED.file_hash,
+                    url = EXCLUDED.url,
+                    asset_id = EXCLUDED.asset_id,
+                    user_name = EXCLUDED.user_name,
+                    status = EXCLUDED.status,
+                    raw_data = COALESCE(alerts.raw_data, '{}'::jsonb) || EXCLUDED.raw_data,
+                    updated_at = NOW()
+                """
+            ),
+            {
+                "alert_id": alert.alert_id,
+                "received_at": alert.timestamp,
+                "alert_type": alert.alert_type.value,
+                "severity": alert.severity.value,
+                "description": alert.description,
+                "source_ip": alert.source_ip,
+                "destination_ip": alert.target_ip,
+                "file_hash": alert.file_hash,
+                "url": alert.url,
+                "asset_id": alert.asset_id,
+                "user_name": alert.user_id,
+                "raw_data": json.dumps(merged_raw),
+                "status": "analyzing",
+            },
+        )
+
+
 async def publish_single_alert(
     alert: SecurityAlert,
     original_message_id: str,
@@ -580,12 +670,15 @@ async def publish_single_alert(
         "message_type": "alert.normalized",
         "correlation_id": alert.alert_id,
         "original_message_id": original_message_id,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now_iso(),
         "version": "1.0",
         "source_type": source_type,
         "aggregation_count": 1,
         "payload": alert.model_dump(),
     }
+
+    # Persist normalized alert to database
+    await persist_normalized_alert(alert, original_message_id, source_type)
 
     # Publish with priority based on severity
     priority = {
@@ -622,13 +715,17 @@ async def publish_batch(
     if not alerts:
         return
 
+    # Persist all normalized alerts to database
+    for alert in alerts:
+        await persist_normalized_alert(alert, original_message_id, source_type)
+
     # Create aggregated message
     batch_message = {
         "message_id": str(uuid.uuid4()),
         "message_type": "alert.normalized.batch",
         "correlation_id": alerts[0].alert_id,
         "original_message_id": original_message_id,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now_iso(),
         "version": "1.0",
         "source_type": source_type,
         "aggregation_count": len(alerts),
@@ -671,7 +768,7 @@ async def health_check():
         return {
             "status": "healthy",
             "service": "alert-normalizer",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now_iso(),
             "checks": {
                 "database": "connected" if db_manager else "disconnected",
                 "message_queue_consumer": "connected" if consumer else "disconnected",

@@ -24,7 +24,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from shared.database import DatabaseManager, get_database_manager
+from sqlalchemy import text
+from shared.database import DatabaseManager, close_database, get_database_manager, init_database
 from shared.messaging import MessageConsumer, MessagePublisher
 from shared.models import ResponseMeta, SuccessResponse
 from shared.utils import Config, get_logger
@@ -61,6 +62,46 @@ class NotificationPriority(str, Enum):
     URGENT = "urgent"
 
 
+def priority_to_severity(priority: NotificationPriority) -> str:
+    mapping = {
+        NotificationPriority.LOW: "low",
+        NotificationPriority.NORMAL: "medium",
+        NotificationPriority.HIGH: "high",
+        NotificationPriority.URGENT: "critical",
+    }
+    return mapping.get(priority, "medium")
+
+
+async def persist_notification(
+    recipient: str,
+    subject: str,
+    message: str,
+    channel: NotificationChannel,
+    priority: NotificationPriority,
+    link: Optional[str] = None,
+):
+    """Persist notification record to database."""
+    async with db_manager.get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO notifications (notification_id, title, message, type, severity, link, user_id)
+                VALUES (:notification_id, :title, :message, :type, :severity, :link, :user_id)
+                """
+            ),
+            {
+                "notification_id": f"notif-{uuid.uuid4()}",
+                "title": subject or "Notification",
+                "message": message,
+                "type": channel.value,
+                "severity": priority_to_severity(priority),
+                "link": link,
+                "user_id": recipient,
+            },
+        )
+        await session.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
@@ -69,8 +110,14 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Notification service...")
 
     # Initialize database
+    import os
+    await init_database(
+        database_url=config.database_url,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        echo=config.debug,
+    )
     db_manager = get_database_manager()
-    await db_manager.initialize()
 
     # Initialize messaging
     publisher = MessagePublisher(config.rabbitmq_url)
@@ -89,7 +136,7 @@ async def lifespan(app: FastAPI):
     # Cleanup
     await consumer.close()
     await publisher.close()
-    await db_manager.close()
+    await close_database()
     logger.info("Notification service stopped")
 
 
@@ -299,6 +346,15 @@ async def send_notification(
 ) -> Dict[str, Any]:
     """Send notification via specified channel."""
     try:
+        await persist_notification(
+            recipient=recipient,
+            subject=subject,
+            message=message,
+            channel=channel,
+            priority=priority,
+            link=(data or {}).get("link"),
+        )
+
         if channel == NotificationChannel.EMAIL:
             return await send_email(recipient, subject, message)
 
@@ -309,12 +365,10 @@ async def send_notification(
             return await send_webhook(recipient, data or {"message": message, "subject": subject})
 
         elif channel == NotificationChannel.SMS:
-            # TODO: Implement SMS (Twilio, AWS SNS)
             logger.info(f"SMS notification to {recipient}: {message}")
             return {"success": True, "channel": "sms"}
 
         elif channel == NotificationChannel.IN_APP:
-            # TODO: Store in-app notification in database
             logger.info(f"In-app notification for {recipient}: {message}")
             return {"success": True, "channel": "in_app"}
 

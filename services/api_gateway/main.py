@@ -32,6 +32,7 @@ from loguru import logger
 
 from routes.alerts import router as alerts_router
 from routes.analytics import router as analytics_router
+from routes.auth import router as auth_router
 
 import sys
 sys.path.insert(0, '/Users/newmba/security')
@@ -174,7 +175,6 @@ app.include_router(
 )
 app.include_router(
     auth_router,
-    prefix="/api/v1/auth",
     tags=["Authentication"],
 )
 

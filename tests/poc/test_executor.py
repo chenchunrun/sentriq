@@ -24,13 +24,13 @@ import json
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 
 @dataclass
-class TestResult:
+class ScenarioResult:
     """Result of a single test execution."""
 
     scenario: str
@@ -46,9 +46,9 @@ class POCTestExecutor:
 
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url
-        self.results: List[TestResult] = []
+        self.results: List[ScenarioResult] = []
 
-    async def execute_scenario_1(self) -> TestResult:
+    async def execute_scenario_1(self) -> ScenarioResult:
         """
         Scenario 1: Normal Alert Processing Flow
 
@@ -112,7 +112,7 @@ class POCTestExecutor:
 
         duration = time.time() - start_time
 
-        result = TestResult(
+        result = ScenarioResult(
             scenario="scenario1",
             test_name="normal_alert_processing",
             passed=passed,
@@ -129,7 +129,7 @@ class POCTestExecutor:
 
         return result
 
-    async def execute_scenario_2(self) -> TestResult:
+    async def execute_scenario_2(self) -> ScenarioResult:
         """
         Scenario 2: High Load Performance Test
 
@@ -213,7 +213,7 @@ class POCTestExecutor:
 
         duration = time.time() - start_time
 
-        result = TestResult(
+        result = ScenarioResult(
             scenario="scenario2",
             test_name="high_load_performance",
             passed=passed,
@@ -230,7 +230,7 @@ class POCTestExecutor:
 
         return result
 
-    async def execute_scenario_3(self) -> TestResult:
+    async def execute_scenario_3(self) -> ScenarioResult:
         """
         Scenario 3: AI Classification Accuracy Test
 
@@ -294,7 +294,7 @@ class POCTestExecutor:
 
         duration = time.time() - start_time
 
-        result = TestResult(
+        result = ScenarioResult(
             scenario="scenario3",
             test_name="ai_accuracy",
             passed=passed,
@@ -319,7 +319,7 @@ class POCTestExecutor:
 
         report = {
             "poc_summary": {
-                "execution_date": datetime.utcnow().isoformat(),
+                "execution_date": datetime.now(UTC).isoformat(),
                 "total_scenarios": total_tests,
                 "passed": passed_tests,
                 "failed": failed_tests,
@@ -402,7 +402,7 @@ async def main():
     print("\n" + "=" * 60)
     print("Security Triage System - POC Test Execution")
     print("=" * 60)
-    print(f"Start Time: {datetime.utcnow().isoformat()}")
+    print(f"Start Time: {datetime.now(UTC).isoformat()}")
 
     if args.scenario == "all":
         # Execute all scenarios
@@ -418,7 +418,7 @@ async def main():
         elif args.scenario == "3":
             await executor.execute_scenario_3()
 
-    print(f"\nEnd Time: {datetime.utcnow().isoformat()}")
+    print(f"\nEnd Time: {datetime.now(UTC).isoformat()}")
 
     # Generate and save report
     executor.save_report(args.output)

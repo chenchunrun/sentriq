@@ -22,7 +22,7 @@ Generates realistic security alert data for POC testing.
 import json
 import random
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
 from typing import Any, Dict, List
 
@@ -116,7 +116,7 @@ class AlertDataGenerator:
             severity = random.choice(type_config["severities"])
 
         # Generate timestamp (within last 24 hours)
-        timestamp = datetime.utcnow() - timedelta(
+        timestamp = datetime.now(UTC) - timedelta(
             hours=random.randint(0, 24), minutes=random.randint(0, 60)
         )
 

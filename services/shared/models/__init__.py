@@ -112,6 +112,7 @@ from .workflow import (
     HumanTask,
     PlaybookAction,
     PlaybookExecution,
+    PlaybookStatus,
     TaskPriority,
     TaskStatus,
     WorkflowDefinition,
@@ -164,6 +165,7 @@ __all__ = [
     "PlaybookAction",
     "AutomationPlaybook",
     "PlaybookExecution",
+    "PlaybookStatus",
     # LLM
     "LLMProvider",
     "LLMModel",

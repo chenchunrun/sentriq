@@ -1,12 +1,63 @@
 # Development Roadmap
 
-**Version**: 1.0
-**Last Updated**: 2025-02-09
+**Version**: 1.1
+**Last Updated**: 2026-03-08
 **Project**: Security Alert Triage System
 
 ---
 
-## 📊 Project Status Overview
+## 📊 Current Status Update (2026-03-08)
+
+### Actual Repository State
+
+- Core services, system tests, integration tests, and unit tests are currently green in the local workspace.
+- Historical roadmap phases are no longer the active source of truth for day-to-day work; the repository is in stabilization and integration close-out mode.
+- Recent work focused on:
+  - fixing stale test failures and compatibility drift
+  - normalizing UTC time handling across services, models, and tests
+  - correcting threat intelligence aggregation scoring
+  - cleaning deprecated test patterns and warning noise
+  - restoring RabbitMQ-backed message queue integration coverage
+  - enabling real local Temporal workflow execution with the Temporal CLI dev server
+  - enforcing JWT/RBAC on core API gateway alert and analytics routes
+  - aligning local default credentials and frontend auth flow with the current API gateway
+
+### Latest Test Status
+
+```bash
+pytest -q tests -q
+164 passed, 64 skipped in 19.25s
+```
+
+### Meaning Of The Current Skips
+
+- External infrastructure not enabled locally (full service stack, API keys)
+- Explicit environment-gated suites (`RUN_E2E_TESTS=true`)
+- Remaining skips are primarily environment-gated rather than stale compatibility skips
+
+### Local Integration Baseline
+
+- Local Temporal development server verified with `temporal server start-dev`
+- `workflow_engine` now connects to Temporal successfully when `TEMPORAL_ENABLED=true`
+- Real workflow execution verified through Temporal and mirrored back into `workflow_executions`
+- `api_gateway` now enforces JWT/RBAC on core alert and analytics routes
+- Web dashboard auth flow was updated to use the API client for `/api/v1/auth/me`, avoiding cross-port origin drift during local development
+- Web dashboard local dev flow was verified through the Vite server on `127.0.0.1:9000`
+- End-to-end local UI/API smoke path is now verified for:
+  - login through the frontend dev server proxy
+  - alert creation through the frontend proxy path
+  - alert listing through the frontend proxy path
+  - dashboard metrics retrieval through the frontend proxy path
+  - alert detail status transitions through the frontend proxy path
+  - workflow execution listing and workflow start through the frontend proxy path
+  - workflow step detail rendering from real execution output
+- Local default credentials are now consistent across database seed, docs, and dashboard hints:
+  - `admin / admin123`
+  - `analyst / analyst123`
+
+---
+
+## 📊 Historical Project Status Overview
 
 ### ✅ Completed (Phase 1)
 
@@ -208,6 +259,16 @@
 
 ## 🎯 Recommended Next Steps
 
+### Current Iteration (Recommended)
+
+```
+1. Run full local service-stack smoke tests with web dashboard + API gateway + workflow engine together
+2. Continue extending RBAC coverage to remaining API gateway route groups
+3. Start end-to-end local message-chain verification across live services
+```
+
+**Outcome**: Move the project from "tests pass in core and queue paths" to "stabilized local development workflow with minimal environment skips".
+
 ### Option A: Quick Core Value Validation (Recommended)
 
 ```
@@ -286,6 +347,38 @@ When implementing each phase, use this template:
 ---
 
 ## 📈 Progress Tracking
+
+## 2026-03-08 Local Integration Baseline
+
+The current local development baseline is ahead of the original phased status in this document. These end-to-end flows are now verified against real running services:
+
+- `Web Dashboard (9000) -> API Gateway (8000)` for login, alert create/list/detail, analytics dashboard, and alert status transitions
+- `Web Dashboard (9000) -> Workflow Engine (8018)` for workflow listing, execution start, and step detail expansion
+- `Web Dashboard (9000) -> Automation Orchestrator (9005)` for playbook list, execution start, execution detail, and automation config
+- `Web Dashboard (9000) -> Configuration Service (9009)` for settings load, config group updates, reset-to-default, and per-user preferences persistence
+- `Web Dashboard (9000) -> Reporting Service (9010)` for reports list, report generation, report status lookup, and download
+- `Workflow Engine (8018) -> Temporal CLI dev server (7233)` for real workflow execution
+
+Verified local service endpoints:
+
+- Web Dashboard dev server: `http://127.0.0.1:9000`
+- API Gateway: `http://127.0.0.1:8000`
+- Workflow Engine: `http://127.0.0.1:8018`
+- Automation Orchestrator: `http://127.0.0.1:9005`
+- Configuration Service: `http://127.0.0.1:9009`
+- Reporting Service: `http://127.0.0.1:9010`
+- Temporal gRPC/UI: `127.0.0.1:7233` / `http://127.0.0.1:8233`
+
+Latest manual smoke validations:
+
+- `POST /api/v1/auth/login` returned valid JWTs for `admin/admin123`
+- `GET /api/v1/alerts`, `PATCH /api/v1/alerts/{id}/status`, and `GET /api/v1/analytics/dashboard` all succeeded through the frontend proxy path
+- `GET /api/v1/workflows/executions` and `GET /api/v1/playbooks` returned real execution/template data
+- `POST /api/v1/playbooks/execute` produced completed playbook executions in mock mode
+- `GET /api/v1/config/preferences` and `PUT /api/v1/config/preferences` persisted user settings successfully
+- `PUT /api/v1/config/alerts` and `POST /api/v1/config/alerts/reset` worked through the frontend proxy path
+- `POST /api/v1/reports/generate` produced completed reports against local data
+- `GET /api/v1/reports/{id}/download?format=html` and `format=json` returned `200 OK` through the frontend proxy path
 
 Current Progress: **Phase 1 Complete** (15%)
 - [x] Phase 1: Infrastructure and Core Services

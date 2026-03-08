@@ -19,12 +19,14 @@ This module defines all models related to security alerts, including
 the main alert model, enums for types and severities, and alert status tracking.
 """
 
+import ipaddress
 import re
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from shared.utils.time import utc_now
 
 
 class AlertType(str, Enum):
@@ -191,13 +193,10 @@ class SecurityAlert(BaseModel):
         if v is None:
             return v
 
-        # IPv4 pattern
-        ipv4_pattern = r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
-        # IPv6 pattern (simplified)
-        ipv6_pattern = r"^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$"
-
-        if not (re.match(ipv4_pattern, v) or re.match(ipv6_pattern, v)):
-            raise ValueError(f"Invalid IP address format: {v}")
+        try:
+            ipaddress.ip_address(v)
+        except ValueError as exc:
+            raise ValueError(f"Invalid IP address format: {v}") from exc
 
         return v
 
@@ -236,8 +235,8 @@ class SecurityAlert(BaseModel):
             # Input is offset-aware, use aware now
             now = datetime.now(timezone.utc)
         else:
-            # Input is offset-naive, use naive now
-            now = datetime.utcnow()
+            # Input is offset-naive, compare against naive UTC now
+            now = utc_now().replace(tzinfo=None)
 
         if v > now + timedelta(minutes=5):
             raise ValueError("Timestamp cannot be in the future")

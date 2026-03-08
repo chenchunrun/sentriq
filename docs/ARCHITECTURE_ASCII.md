@@ -505,7 +505,7 @@ Legend:
 │  • QWEN_API_KEY=your-qwen-key                                                      │
 │                                                                                      │
 │  Default Users:                                                                     │
-│  • admin / Admin123 (admin role)                                                  │
+│  • admin / admin123 (admin role)                                                  │
 │  • analyst / analyst123 (analyst role)                                            │
 │                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────┘

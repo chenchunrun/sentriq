@@ -3,18 +3,16 @@
  */
 
 import React, { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import {
-  Play,
-  Pause,
   CheckCircle,
   XCircle,
   Clock,
-  AlertTriangle,
   Eye,
   RefreshCw,
   Filter,
+  Play,
 } from 'lucide-react'
 
 const statusColors = {
@@ -31,6 +29,7 @@ const statusIcons = {
   completed: CheckCircle,
   failed: XCircle,
   cancelled: XCircle,
+  skipped: Clock,
 }
 
 interface WorkflowExecution {
@@ -42,6 +41,7 @@ interface WorkflowExecution {
   completed_at?: string
   alert_id?: string
   playbook_id?: string
+  progress?: number
   steps: WorkflowStep[]
 }
 
@@ -55,9 +55,34 @@ interface WorkflowStep {
   error?: string
 }
 
+const normalizeWorkflow = (workflow: any): WorkflowExecution => {
+  const outputSteps = Array.isArray(workflow?.output?.steps) ? workflow.output.steps : []
+  const steps: WorkflowStep[] = outputSteps.map((step: any, index: number) => ({
+    step_id: step.step || `step-${index + 1}`,
+    name: step.step || `Step ${index + 1}`,
+    type: step.type || 'activity',
+    status: step.status || 'completed',
+    error: step.error,
+  }))
+
+  return {
+    workflow_id: workflow.workflow_id,
+    execution_id: workflow.execution_id,
+    status: workflow.status,
+    current_step: workflow.current_step || workflow.output?.current_step,
+    started_at: workflow.started_at,
+    completed_at: workflow.completed_at,
+    alert_id: workflow.input?.alert_id,
+    playbook_id: workflow.input?.playbook_id,
+    progress: workflow.progress,
+    steps,
+  }
+}
+
 export const Workflows: React.FC = () => {
   const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const queryClient = useQueryClient()
 
   // Fetch workflow executions
   const { data: workflows, isLoading, refetch } = useQuery({
@@ -66,14 +91,27 @@ export const Workflows: React.FC = () => {
     refetchInterval: 5000, // Poll every 5 seconds
   })
 
+  const executeWorkflowMutation = useMutation({
+    mutationFn: () =>
+      api.workflows.executeWorkflow('alert-processing', {
+        alert_id: `wf-ui-${Date.now()}`,
+        risk_level: 'HIGH',
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workflows'] })
+      void refetch()
+    },
+  })
+
   const handleStatusFilter = (status: string) => {
     setStatusFilter(status)
   }
 
   const getFilteredWorkflows = () => {
     if (!workflows) return []
-    if (statusFilter === 'all') return workflows
-    return workflows.filter((w: WorkflowExecution) => w.status === statusFilter)
+    const normalized = workflows.map((w: any) => normalizeWorkflow(w))
+    if (statusFilter === 'all') return normalized
+    return normalized.filter((w: WorkflowExecution) => w.status === statusFilter)
   }
 
   if (isLoading) {
@@ -105,6 +143,14 @@ export const Workflows: React.FC = () => {
         <button onClick={() => refetch()} className="btn btn-outline flex items-center gap-2">
           <RefreshCw className="w-4 h-4" />
           Refresh
+        </button>
+        <button
+          onClick={() => executeWorkflowMutation.mutate()}
+          disabled={executeWorkflowMutation.isPending}
+          className="btn btn-primary flex items-center gap-2"
+        >
+          <Play className="w-4 h-4" />
+          Start Demo Workflow
         </button>
       </div>
 
@@ -242,6 +288,18 @@ export const Workflows: React.FC = () => {
                           Current: {workflow.current_step}
                         </p>
                       )}
+                      <div className="mt-3">
+                        <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                          <span>Progress</span>
+                          <span>{Math.round((workflow.progress || 0) * 100)}%</span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-2">
+                          <div
+                            className="bg-primary-500 h-2 rounded-full transition-all"
+                            style={{ width: `${Math.round((workflow.progress || 0) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
                     </div>
                     <button
                       onClick={() => setSelectedWorkflow(
@@ -259,7 +317,7 @@ export const Workflows: React.FC = () => {
                     <div className="mt-4 border-t pt-4">
                       <h4 className="text-sm font-semibold text-gray-700 mb-3">Execution Steps</h4>
                       <div className="space-y-2">
-                        {workflow.steps.map((step, idx) => {
+                        {(workflow.steps || []).map((step, idx) => {
                           const StepIcon = statusIcons[step.status] || Clock
                           return (
                             <div key={step.step_id} className="flex items-start gap-3 p-3 rounded-lg bg-gray-50">

@@ -198,6 +198,40 @@ class MessageQueueError(SecurityTriageError):
         super().__init__(message, code="MESSAGE_QUEUE_ERROR", details=details)
 
 
+class WorkflowError(SecurityTriageError):
+    """Raised when a workflow operation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        workflow_id: Optional[str] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        if workflow_id and details is None:
+            details = {"workflow_id": workflow_id}
+        elif workflow_id and details:
+            details["workflow_id"] = workflow_id
+
+        super().__init__(message, code="WORKFLOW_ERROR", details=details)
+
+
+class AutomationError(SecurityTriageError):
+    """Raised when an automation/playbook operation fails."""
+
+    def __init__(
+        self,
+        message: str,
+        playbook_id: Optional[str] = None,
+        details: Optional[dict[str, Any]] = None,
+    ):
+        if playbook_id and details is None:
+            details = {"playbook_id": playbook_id}
+        elif playbook_id and details:
+            details["playbook_id"] = playbook_id
+
+        super().__init__(message, code="AUTOMATION_ERROR", details=details)
+
+
 class LLMError(SecurityTriageError):
     """Raised when an LLM operation fails."""
 

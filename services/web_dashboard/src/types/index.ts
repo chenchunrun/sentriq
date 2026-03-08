@@ -30,11 +30,14 @@ export enum AlertSeverity {
 export enum AlertStatus {
   PENDING = 'pending',
   ANALYZING = 'analyzing',
+  ANALYZED = 'analyzed',
+  INVESTIGATING = 'investigating',
   TRIAGED = 'triaged',
   IN_PROGRESS = 'in_progress',
   RESOLVED = 'resolved',
   CLOSED = 'closed',
   FALSE_POSITIVE = 'false_positive',
+  SUPPRESSED = 'suppressed',
 }
 
 export interface IOC {
@@ -232,14 +235,17 @@ export enum ReportFormat {
   EXCEL = 'excel',
   CSV = 'csv',
   JSON = 'json',
+  HTML = 'html',
 }
 
 export interface ReportRequest {
   name: string;
   description?: string;
-  type: 'alerts' | 'metrics' | 'trends' | 'custom';
+  type: 'daily_summary' | 'weekly_summary' | 'monthly_summary' | 'incident_report' | 'trend_analysis';
   format: ReportFormat;
-  filters: AlertFilters | MetricsFilters;
+  filters: AlertFilters | MetricsFilters | Record<string, unknown>;
+  date?: string;
+  alert_id?: string;
   schedule?: {
     frequency: 'daily' | 'weekly' | 'monthly';
     time?: string;
@@ -265,11 +271,11 @@ export interface Report {
 
 export interface SystemConfig {
   key: string;
-  value: string | number | boolean;
+  value: string | number | boolean | string[] | Record<string, unknown>;
   description: string;
   category: string;
   editable: boolean;
-  updated_at: string;
+  updated_at?: string;
 }
 
 export interface FeatureFlag {
@@ -303,7 +309,7 @@ export interface AuthUser {
   id: string;
   username: string;
   email: string;
-  role: 'admin' | 'operator' | 'viewer';
+  role: 'admin' | 'operator' | 'viewer' | 'analyst' | 'security_analyst' | 'auditor';
   permissions: string[];
 }
 
@@ -311,7 +317,7 @@ export interface AuthToken {
   access_token: string;
   refresh_token: string;
   expires_in: number;
-  token_type: 'Bearer';
+  token_type: 'bearer';
 }
 
 export interface LoginCredentials {

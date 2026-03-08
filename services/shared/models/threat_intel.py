@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from shared.utils.time import utc_now
 
 
 class IOCType(str, Enum):
@@ -164,7 +165,7 @@ class AggregatedThreatIntel(BaseModel):
         default_factory=list, description="Intelligence from individual sources"
     )
     aggregation_time: datetime = Field(
-        default_factory=datetime.utcnow, description="Aggregation timestamp"
+        default_factory=utc_now, description="Aggregation timestamp"
     )
     positive_sources: int = Field(..., ge=0, description="Number of sources reporting malicious")
     total_sources: int = Field(..., ge=1, description="Total number of sources queried")

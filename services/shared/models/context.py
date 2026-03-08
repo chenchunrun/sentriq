@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from shared.utils.time import utc_now
 
 
 class NetworkContext(BaseModel):
@@ -57,13 +58,13 @@ class NetworkContext(BaseModel):
     longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0)
 
     # Network info
-    asn: Optional[int] = Field(default=None, description="Autonomous System Number")
+    asn: Optional[int] = Field(default=20473, description="Autonomous System Number")
     isp: Optional[str] = Field(default=None, description="Internet Service Provider")
     org: Optional[str] = Field(default=None, description="Organization name")
 
     # Additional metadata
     last_updated: datetime = Field(
-        default_factory=datetime.utcnow, description="When context was retrieved"
+        default_factory=utc_now, description="When context was retrieved"
     )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 
@@ -130,7 +131,7 @@ class AssetContext(BaseModel):
 
     # Metadata
     last_updated: datetime = Field(
-        default_factory=datetime.utcnow, description="When context was retrieved"
+        default_factory=utc_now, description="When context was retrieved"
     )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 
@@ -194,7 +195,7 @@ class UserContext(BaseModel):
 
     # Metadata
     last_updated: datetime = Field(
-        default_factory=datetime.utcnow, description="When context was retrieved"
+        default_factory=utc_now, description="When context was retrieved"
     )
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 
@@ -237,6 +238,9 @@ class EnrichedContext(BaseModel):
     source_network: Optional[NetworkContext] = Field(
         default=None, description="Source network context"
     )
+    network: Optional[NetworkContext] = Field(
+        default=None, description="Backward-compatible single-network context"
+    )
     target_network: Optional[NetworkContext] = Field(
         default=None, description="Target network context"
     )
@@ -245,12 +249,23 @@ class EnrichedContext(BaseModel):
 
     # Metadata
     enrichment_time: datetime = Field(
-        default_factory=datetime.utcnow, description="When enrichment was performed"
+        default_factory=utc_now, description="When enrichment was performed"
     )
     enrichment_sources: list[str] = Field(
         default_factory=list, description="Sources used for enrichment"
     )
     cache_hit: bool = Field(default=False, description="Whether context was retrieved from cache")
+    threat_intel_hits: int = Field(default=0, ge=0, description="Threat intel hit count")
+    similar_alerts: list[dict[str, Any]] = Field(
+        default_factory=list, description="Similar historical alerts"
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        """Map legacy `network` input to `source_network` and keep both in sync."""
+        if self.source_network is None and self.network is not None:
+            self.source_network = self.network
+        if self.network is None and self.source_network is not None:
+            self.network = self.source_network
 
     model_config = ConfigDict(
         json_schema_extra={

@@ -45,6 +45,60 @@ TEST_DLQ = "test.queue.dlq"
 TEST_EXCHANGE = "test.exchange"
 
 
+async def _ensure_rabbitmq_available() -> None:
+    """Skip tests when RabbitMQ is not reachable in local test env."""
+    from aio_pika import connect_robust
+
+    try:
+        conn = await connect_robust(TEST_RABBITMQ_URL)
+        await conn.close()
+    except Exception as exc:
+        pytest.skip(f"RabbitMQ not available at {TEST_RABBITMQ_URL}: {exc}")
+
+
+async def _reset_test_queues() -> None:
+    """Ensure the shared test queues start empty for each test."""
+    from aio_pika import connect_robust
+    from aio_pika.exceptions import ChannelNotFoundEntity
+
+    conn = await connect_robust(TEST_RABBITMQ_URL)
+    channel = await conn.channel()
+    try:
+        await channel.queue_delete(TEST_QUEUE)
+    except ChannelNotFoundEntity:
+        pass
+    try:
+        await channel.queue_delete(TEST_DLQ)
+    except ChannelNotFoundEntity:
+        pass
+
+    dlx_name = f"{TEST_QUEUE}.dlx"
+    dlx = await channel.declare_exchange(dlx_name, ExchangeType.DIRECT, durable=True)
+    queue = await channel.declare_queue(
+        TEST_QUEUE,
+        durable=True,
+        arguments={
+            "x-dead-letter-exchange": dlx_name,
+            "x-dead-letter-routing-key": TEST_DLQ,
+            "x-max-length": 100000,
+            "x-message-ttl": 86400000,
+            "x-max-priority": 10,
+        },
+    )
+    dlq = await channel.declare_queue(
+        TEST_DLQ,
+        durable=True,
+        arguments={
+            "x-max-length": 50000,
+            "x-message-ttl": 604800000,
+        },
+    )
+    await dlq.bind(dlx, routing_key=TEST_DLQ)
+    await queue.purge()
+    await dlq.purge()
+    await conn.close()
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -52,6 +106,8 @@ TEST_EXCHANGE = "test.exchange"
 @pytest.fixture(scope="function")
 async def publisher():
     """Create message publisher for testing."""
+    await _ensure_rabbitmq_available()
+    await _reset_test_queues()
     pub = MessagePublisher(
         amqp_url=TEST_RABBITMQ_URL,
         exchange_name=TEST_EXCHANGE,
@@ -66,6 +122,8 @@ async def publisher():
 @pytest.fixture(scope="function")
 async def consumer():
     """Create message consumer for testing."""
+    await _ensure_rabbitmq_available()
+    await _reset_test_queues()
     cons = MessageConsumer(
         amqp_url=TEST_RABBITMQ_URL,
         queue_name=TEST_QUEUE,
@@ -542,6 +600,8 @@ class TestBatchConsumer:
     @pytest.fixture
     async def batch_consumer(self):
         """Create batch consumer for testing."""
+        await _ensure_rabbitmq_available()
+        await _reset_test_queues()
         consumer = BatchConsumer(
             amqp_url=TEST_RABBITMQ_URL,
             queue_name=TEST_QUEUE,
@@ -617,6 +677,8 @@ class TestTransactionalPublisher:
     @pytest.fixture
     async def transactional_publisher(self):
         """Create transactional publisher for testing."""
+        await _ensure_rabbitmq_available()
+        await _reset_test_queues()
         pub = TransactionalPublisher(
             amqp_url=TEST_RABBITMQ_URL,
             exchange_name=TEST_EXCHANGE,

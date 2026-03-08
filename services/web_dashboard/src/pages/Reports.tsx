@@ -41,8 +41,8 @@ export const Reports: React.FC = () => {
   const [newReport, setNewReport] = useState<Partial<ReportRequest>>({
     name: '',
     description: '',
-    type: 'alerts',
-    format: 'pdf' as ReportFormat,
+    type: 'daily_summary',
+    format: 'html' as ReportFormat,
     filters: {},
   })
 
@@ -92,14 +92,14 @@ export const Reports: React.FC = () => {
 
   const handleCreateReport = async () => {
     try {
-      const report = await api.reports.createReport(newReport as ReportRequest)
-      setReports([report, ...reports])
+      await api.reports.createReport(newReport as ReportRequest)
+      await loadReports()
       setShowCreateModal(false)
       setNewReport({
         name: '',
         description: '',
-        type: 'alerts',
-        format: 'pdf' as ReportFormat,
+        type: 'daily_summary',
+        format: 'html' as ReportFormat,
         filters: {},
       })
     } catch (error) {
@@ -142,23 +142,24 @@ export const Reports: React.FC = () => {
       setPreviewingReport(report)
 
       // Fetch report content for preview
-      const response = await fetch(`/api/v1/reports/${report.id}/download`)
+      const normalizedFormat = report.format === 'pdf'
+        ? 'html'
+        : report.format === 'excel'
+          ? 'csv'
+          : report.format
+      const response = await fetch(`/api/v1/reports/${report.id}/download?format=${normalizedFormat}`)
       if (!response.ok) throw new Error('Failed to fetch report')
 
-      if (report.format === 'pdf') {
-        // For PDF/HTML reports (stored as HTML), get text content
+      if (normalizedFormat === 'html') {
         const text = await response.text()
         setPreviewContent(text)
-      } else if (report.format === 'json') {
-        // For JSON reports, format and display
+      } else if (normalizedFormat === 'json') {
         const json = await response.json()
         setPreviewContent(JSON.stringify(json, null, 2))
-      } else if (report.format === 'csv') {
-        // For CSV reports, display as text
+      } else if (normalizedFormat === 'csv') {
         const text = await response.text()
         setPreviewContent(text)
-      } else if (report.format === 'excel') {
-        // For Excel reports, display as text (if readable)
+      } else {
         const text = await response.text()
         setPreviewContent(text)
       }
@@ -490,10 +491,10 @@ export const Reports: React.FC = () => {
                     onChange={(e) => setNewReport({ ...newReport, type: e.target.value as any })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
                   >
-                    <option value="alerts">Alert Report</option>
-                    <option value="metrics">Metrics Report</option>
-                    <option value="trends">Trends Report</option>
-                    <option value="custom">Custom Report</option>
+                    <option value="daily_summary">Daily Summary</option>
+                    <option value="weekly_summary">Weekly Summary</option>
+                    <option value="monthly_summary">Monthly Summary</option>
+                    <option value="trend_analysis">Trend Analysis</option>
                   </select>
                 </div>
 
@@ -506,10 +507,9 @@ export const Reports: React.FC = () => {
                     onChange={(e) => setNewReport({ ...newReport, format: e.target.value as ReportFormat })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
                   >
-                    <option value="pdf">PDF</option>
+                    <option value="html">HTML</option>
                     <option value="csv">CSV</option>
                     <option value="json">JSON</option>
-                    <option value="excel">Excel</option>
                   </select>
                 </div>
               </div>

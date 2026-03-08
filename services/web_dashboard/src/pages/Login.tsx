@@ -2,17 +2,24 @@
  * Login Page
  */
 
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
 import { Shield } from 'lucide-react'
 
 export const Login: React.FC = () => {
   const navigate = useNavigate()
-  const { login, isLoading } = useAuth()
+  const { login, isLoading, user } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+
+  // Navigate when user becomes authenticated
+  useEffect(() => {
+    if (user) {
+      navigate('/', { replace: true })
+    }
+  }, [user, navigate])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -20,8 +27,7 @@ export const Login: React.FC = () => {
 
     try {
       await login({ username, password })
-      navigate('/')
-    } catch (err) {
+    } catch {
       setError('Invalid username or password')
     }
   }
@@ -87,12 +93,14 @@ export const Login: React.FC = () => {
             </button>
           </form>
 
-          {/* Demo credentials hint */}
-          <div className="mt-6 p-4 bg-gray-50 rounded-md">
-            <p className="text-xs text-gray-600 font-medium mb-2">Demo Credentials:</p>
-            <p className="text-xs text-gray-500">Username: admin / Password: admin123</p>
-            <p className="text-xs text-gray-500">Username: operator / Password: operator123</p>
-          </div>
+          {/* Demo credentials hint - only show in development */}
+          {import.meta.env.DEV && (
+            <div className="mt-6 p-4 bg-gray-50 rounded-md">
+              <p className="text-xs text-gray-600 font-medium mb-2">Demo Credentials (DEV ONLY):</p>
+              <p className="text-xs text-gray-500">Username: admin / Password: admin123</p>
+              <p className="text-xs text-gray-500">Username: analyst / Password: analyst123</p>
+            </div>
+          )}
         </div>
 
         <p className="text-center text-xs text-gray-500 mt-6">

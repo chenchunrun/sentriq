@@ -23,11 +23,11 @@ Calculates composite risk scores based on multiple factors:
 - Historical patterns
 """
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from shared.models.alert import AlertType, Severity
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now_iso
 
 logger = get_logger(__name__)
 
@@ -129,8 +129,16 @@ class RiskScoringEngine:
             historical_multiplier = self._calculate_historical_multiplier(historical_data)
 
             # Get alert type multiplier
-            alert_type_str = alert.get("alert_type", "other")
-            alert_type = AlertType(alert_type_str) if isinstance(alert_type_str, str) else AlertType.OTHER
+            alert_type_raw = alert.get("alert_type", "other")
+            if isinstance(alert_type_raw, AlertType):
+                alert_type = alert_type_raw
+            elif isinstance(alert_type_raw, str):
+                try:
+                    alert_type = AlertType(alert_type_raw)
+                except ValueError:
+                    alert_type = AlertType.OTHER
+            else:
+                alert_type = AlertType.OTHER
             type_multiplier = self.ALERT_TYPE_MULTIPLIERS.get(alert_type, 1.0)
 
             # Calculate base score
@@ -186,7 +194,7 @@ class RiskScoringEngine:
                     "type_multiplier": type_multiplier,
                     "historical_multiplier": historical_multiplier,
                 },
-                "calculated_at": datetime.utcnow().isoformat(),
+                "calculated_at": utc_now_iso(),
             }
 
             logger.info(
@@ -248,7 +256,8 @@ class RiskScoringEngine:
             if is_external:
                 exploitability_score += 20  # External threats more concerning
 
-            reputation_score = network_context.get("reputation", {}).get("score", 50)
+            reputation = network_context.get("reputation") or {}
+            reputation_score = reputation.get("score", 50)
             if reputation_score > 70:
                 exploitability_score += 15
 

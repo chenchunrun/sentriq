@@ -13,11 +13,15 @@ asyncpg>=0.29.0
 # Message Queue
 aio-pika>=9.3.0
 
+# Cache
+redis[hiredis]>=4.6.0
+
 # Logging
 loguru>=0.7.0
 
 # Utilities
 python-dateutil>=2.8.2
+temporalio>=1.6.0
 
 # Shared services (import from parent)
 # -shared.models

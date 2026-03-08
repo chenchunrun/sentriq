@@ -16,6 +16,7 @@
 
 import asyncio
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -23,7 +24,9 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from shared.database import DatabaseManager, get_database_manager
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+from shared.database import DatabaseManager, close_database, get_database_manager, init_database
 from shared.errors import AutomationError
 from shared.messaging import MessageConsumer, MessagePublisher
 from shared.models import (
@@ -126,6 +129,168 @@ DEFAULT_PLAYBOOKS = {
 }
 
 
+class PlaybookExecuteRequest(BaseModel):
+    playbook_id: str
+    alert_id: str
+    input_data: Dict[str, Any] = Field(default_factory=dict)
+
+
+async def seed_default_playbooks():
+    """Persist default playbooks into database if missing."""
+    async with db_manager.get_session() as session:
+        for pb in DEFAULT_PLAYBOOKS.values():
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO automation_playbooks (playbook_id, name, description, version,
+                                                     actions, approval_required, timeout_seconds,
+                                                     trigger_conditions, created_by)
+                    VALUES (:playbook_id, :name, :description, :version,
+                            CAST(:actions AS jsonb), :approval_required, :timeout_seconds,
+                            CAST(:trigger_conditions AS jsonb), :created_by)
+                    ON CONFLICT (playbook_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        version = EXCLUDED.version,
+                        actions = EXCLUDED.actions,
+                        approval_required = EXCLUDED.approval_required,
+                        timeout_seconds = EXCLUDED.timeout_seconds,
+                        trigger_conditions = EXCLUDED.trigger_conditions,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "playbook_id": pb.playbook_id,
+                    "name": pb.name,
+                    "description": pb.description,
+                    "version": pb.version,
+                    "actions": json.dumps([a.model_dump() for a in pb.actions]),
+                    "approval_required": pb.approval_required,
+                    "timeout_seconds": pb.timeout_seconds,
+                    "trigger_conditions": json.dumps(pb.trigger_conditions or {}),
+                    "created_by": "system",
+                },
+            )
+        await session.commit()
+
+
+async def ensure_automation_tables() -> None:
+    """Create local automation metadata tables when they are missing."""
+    async with db_manager.engine.begin() as conn:
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS automation_playbooks (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    playbook_id VARCHAR(255) UNIQUE NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    description TEXT,
+                    version VARCHAR(50) NOT NULL,
+                    actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    approval_required BOOLEAN NOT NULL DEFAULT FALSE,
+                    timeout_seconds INTEGER NOT NULL DEFAULT 600,
+                    trigger_conditions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_by VARCHAR(255) NOT NULL DEFAULT 'system',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS playbook_executions (
+                    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                    execution_id VARCHAR(255) UNIQUE NOT NULL,
+                    playbook_id VARCHAR(255) NOT NULL,
+                    trigger_alert_id VARCHAR(255),
+                    status VARCHAR(50) NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ,
+                    current_action VARCHAR(255),
+                    current_action_index INTEGER NOT NULL DEFAULT 0,
+                    approval_status VARCHAR(50),
+                    results JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    error_message TEXT
+                )
+                """
+            )
+        )
+
+
+async def load_playbooks_from_db() -> Dict[str, AutomationPlaybook]:
+    """Load playbooks from database."""
+    playbook_map: Dict[str, AutomationPlaybook] = {}
+    async with db_manager.get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT playbook_id, name, description, version, actions, approval_required,
+                       timeout_seconds, trigger_conditions
+                FROM automation_playbooks
+                """
+            )
+        )
+        rows = result.fetchall()
+
+    for row in rows:
+        actions = [PlaybookAction(**a) for a in (row.actions or [])]
+        playbook_map[row.playbook_id] = AutomationPlaybook(
+            playbook_id=row.playbook_id,
+            name=row.name,
+            description=row.description,
+            version=row.version,
+            actions=actions,
+            approval_required=row.approval_required,
+            timeout_seconds=row.timeout_seconds,
+            trigger_conditions=row.trigger_conditions or {},
+        )
+
+    return playbook_map
+
+
+async def persist_playbook_execution(execution: PlaybookExecution):
+    """Persist playbook execution to database."""
+    async with db_manager.get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO playbook_executions (execution_id, playbook_id, trigger_alert_id,
+                                                 status, started_at, completed_at,
+                                                 current_action, current_action_index,
+                                                 approval_status, results, error_message)
+                VALUES (:execution_id, :playbook_id, :trigger_alert_id,
+                        :status, :started_at, :completed_at,
+                        :current_action, :current_action_index,
+                        :approval_status, CAST(:results AS jsonb), :error_message)
+                ON CONFLICT (execution_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    completed_at = EXCLUDED.completed_at,
+                    current_action = EXCLUDED.current_action,
+                    current_action_index = EXCLUDED.current_action_index,
+                    approval_status = EXCLUDED.approval_status,
+                    results = EXCLUDED.results,
+                    error_message = EXCLUDED.error_message
+                """
+            ),
+            {
+                "execution_id": execution.execution_id,
+                "playbook_id": execution.playbook_id,
+                "trigger_alert_id": execution.trigger_alert_id,
+                "status": execution.status.value,
+                "started_at": execution.started_at,
+                "completed_at": execution.completed_at,
+                "current_action": execution.current_action,
+                "current_action_index": execution.current_action_index,
+                "approval_status": execution.approval_status,
+                "results": json.dumps(execution.results or []),
+                "error_message": execution.error,
+            },
+        )
+        await session.commit()
+
+
 # Action executors
 class ActionExecutor:
     """Base class for action executors."""
@@ -167,11 +332,12 @@ class SSHCommandExecutor(ActionExecutor):
                 "status": "success",
                 "output": f"Command executed successfully on {target}",
                 "exit_code": 0,
+                "_mock": True,
             }
 
         except Exception as e:
             logger.error(f"SSH command execution failed: {e}", exc_info=True)
-            return {"status": "failed", "error": str(e)}
+            return {"status": "failed", "error": str(e), "_mock": True}
 
 
 class EDRCommandExecutor(ActionExecutor):
@@ -192,11 +358,15 @@ class EDRCommandExecutor(ActionExecutor):
             # TODO: Implement actual EDR API call
             await asyncio.sleep(1)
 
-            return {"status": "success", "output": f"File {file_hash} quarantined successfully"}
+            return {
+                "status": "success",
+                "output": f"File {file_hash} quarantined successfully",
+                "_mock": True,
+            }
 
         except Exception as e:
             logger.error(f"EDR command execution failed: {e}", exc_info=True)
-            return {"status": "failed", "error": str(e)}
+            return {"status": "failed", "error": str(e), "_mock": True}
 
 
 class EmailCommandExecutor(ActionExecutor):
@@ -220,11 +390,12 @@ class EmailCommandExecutor(ActionExecutor):
             return {
                 "status": "success",
                 "output": f"Email action {email_action} completed for {sender}",
+                "_mock": True,
             }
 
         except Exception as e:
             logger.error(f"Email command execution failed: {e}", exc_info=True)
-            return {"status": "failed", "error": str(e)}
+            return {"status": "failed", "error": str(e), "_mock": True}
 
 
 class APICallExecutor(ActionExecutor):
@@ -233,10 +404,9 @@ class APICallExecutor(ActionExecutor):
     async def execute(self, action: PlaybookAction, context: Dict[str, Any]) -> Dict[str, Any]:
         """Execute HTTP API call."""
         try:
-            import httpx
-
             endpoint = action.parameters.get("endpoint", "").format(**context)
             method = action.parameters.get("method", "POST").upper()
+            mock_mode = os.getenv("AUTOMATION_MOCK_MODE", "true").lower() == "true"
 
             # Build request
             url = f"{context.get('base_url', '')}/{endpoint}"
@@ -247,6 +417,17 @@ class APICallExecutor(ActionExecutor):
             }
 
             logger.info(f"Executing API call: {method} {url}")
+
+            if mock_mode:
+                await asyncio.sleep(0.2)
+                return {
+                    "status": "success",
+                    "output": {"mock": True, "method": method, "url": url, "body": body},
+                    "status_code": 200,
+                    "_mock": True,
+                }
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 if method == "GET":
@@ -305,8 +486,17 @@ async def execute_playbook_action(
         # Check conditions
         if action.conditions:
             for condition in action.conditions:
-                # TODO: Implement proper condition evaluation
-                pass
+                field = condition.get("field")
+                op = condition.get("op", "equals")
+                value = condition.get("value")
+                actual = context.get(field)
+
+                if op == "equals" and actual != value:
+                    return {"status": "skipped", "reason": f"{field} != {value}"}
+                if op == "in" and actual not in (value or []):
+                    return {"status": "skipped", "reason": f"{field} not in {value}"}
+                if op == "gte" and (actual is None or actual < value):
+                    return {"status": "skipped", "reason": f"{field} < {value}"}
 
         # Get executor
         executor = ACTION_EXECUTORS.get(action.action_type)
@@ -355,10 +545,38 @@ async def execute_playbook(execution: PlaybookExecution):
         }
 
         # Check approval
+        auto_approve = os.getenv("AUTOMATION_AUTO_APPROVE", "true").lower() == "true"
         if playbook.approval_required and execution.approval_status != "approved":
-            execution.status = WorkflowStatus.PENDING
-            logger.info(f"Playbook {execution.playbook_id} awaiting approval")
-            return
+            if auto_approve:
+                execution.approval_status = "approved"
+                execution.approved_by = "system:auto"
+                logger.info(
+                    f"Playbook {execution.playbook_id} auto-approved (AUTOMATION_AUTO_APPROVE=true)"
+                )
+            else:
+                execution.status = WorkflowStatus.PENDING
+                logger.info(f"Playbook {execution.playbook_id} awaiting approval")
+                await publisher.publish(
+                    "notifications.send",
+                    {
+                        "message_id": str(uuid.uuid4()),
+                        "message_type": "notification.request",
+                        "payload": {
+                            "channel": "in_app",
+                            "recipient": "security-team",
+                            "subject": f"Playbook approval required: {execution.playbook_id}",
+                            "message": f"Execution {execution.execution_id} awaits approval",
+                            "priority": "high",
+                            "data": {
+                                "execution_id": execution.execution_id,
+                                "playbook_id": execution.playbook_id,
+                            },
+                        },
+                        "timestamp": datetime.utcnow().isoformat(),
+                    },
+                )
+                await persist_playbook_execution(execution)
+                return
 
         # Execute each action
         for i, action in enumerate(playbook.actions):
@@ -406,6 +624,8 @@ async def execute_playbook(execution: PlaybookExecution):
             },
         )
 
+        await persist_playbook_execution(execution)
+
         logger.info(
             f"Playbook execution {execution.execution_id} completed: {execution.status.value}"
         )
@@ -415,6 +635,7 @@ async def execute_playbook(execution: PlaybookExecution):
         execution.status = WorkflowStatus.FAILED
         execution.error = str(e)
         execution.completed_at = datetime.utcnow()
+        await persist_playbook_execution(execution)
 
 
 @asynccontextmanager
@@ -425,8 +646,15 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Automation Orchestrator service...")
 
     # Initialize database
+    import os
+    await init_database(
+        database_url=config.database_url,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        echo=config.debug,
+    )
     db_manager = get_database_manager()
-    await db_manager.initialize()
+    await ensure_automation_tables()
 
     # Initialize messaging
     publisher = MessagePublisher(config.rabbitmq_url)
@@ -436,7 +664,8 @@ async def lifespan(app: FastAPI):
     await consumer.connect()
 
     # Load default playbooks
-    playbooks.update(DEFAULT_PLAYBOOKS)
+    await seed_default_playbooks()
+    playbooks.update(await load_playbooks_from_db())
 
     # Start consuming automation triggers
     asyncio.create_task(consume_automation_triggers())
@@ -448,7 +677,7 @@ async def lifespan(app: FastAPI):
     # Cleanup
     await consumer.close()
     await publisher.close()
-    await db_manager.close()
+    await close_database()
     logger.info("Automation Orchestrator service stopped")
 
 
@@ -512,15 +741,65 @@ def start_playbook_execution(
         status=WorkflowStatus.PENDING,
         started_at=datetime.utcnow(),
         results=[],
+        input_data=input_data,
     )
-
-    # Add input data to execution
-    execution.input_data = input_data
 
     # Start execution in background
     asyncio.create_task(execute_playbook(execution))
+    asyncio.create_task(persist_playbook_execution(execution))
 
     return execution
+
+
+async def fetch_playbook_executions_from_db(
+    status: Optional[WorkflowStatus] = None, playbook_id: Optional[str] = None
+) -> List[PlaybookExecution]:
+    """Fetch playbook executions from database."""
+    conditions = []
+    params: Dict[str, Any] = {}
+
+    if status:
+        conditions.append("status = :status")
+        params["status"] = status.value
+    if playbook_id:
+        conditions.append("playbook_id = :playbook_id")
+        params["playbook_id"] = playbook_id
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    async with db_manager.get_session() as session:
+        result = await session.execute(
+            text(
+                f"""
+                SELECT execution_id, playbook_id, trigger_alert_id, status, started_at, completed_at,
+                       current_action, current_action_index
+                FROM playbook_executions
+                {where_clause}
+                ORDER BY started_at DESC
+                LIMIT 200
+                """
+            ),
+            params,
+        )
+        rows = result.fetchall()
+
+    executions: List[PlaybookExecution] = []
+    for row in rows:
+        executions.append(
+            PlaybookExecution(
+                execution_id=row.execution_id,
+                playbook_id=row.playbook_id,
+                trigger_alert_id=row.trigger_alert_id,
+                status=WorkflowStatus(row.status),
+                started_at=row.started_at,
+                completed_at=row.completed_at,
+                current_action=row.current_action,
+                current_action_index=row.current_action_index,
+                results=[],
+            )
+        )
+
+    return executions
 
 
 # API Endpoints
@@ -531,8 +810,40 @@ async def create_playbook(playbook: AutomationPlaybook):
     """Create a new automation playbook."""
     try:
         playbooks[playbook.playbook_id] = playbook
-
-        # TODO: Save to database
+        async with db_manager.get_session() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO automation_playbooks (playbook_id, name, description, version,
+                                                     actions, approval_required, timeout_seconds,
+                                                     trigger_conditions, created_by)
+                    VALUES (:playbook_id, :name, :description, :version,
+                            :actions::jsonb, :approval_required, :timeout_seconds,
+                            :trigger_conditions::jsonb, :created_by)
+                    ON CONFLICT (playbook_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        version = EXCLUDED.version,
+                        actions = EXCLUDED.actions,
+                        approval_required = EXCLUDED.approval_required,
+                        timeout_seconds = EXCLUDED.timeout_seconds,
+                        trigger_conditions = EXCLUDED.trigger_conditions,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "playbook_id": playbook.playbook_id,
+                    "name": playbook.name,
+                    "description": playbook.description,
+                    "version": playbook.version,
+                    "actions": json.dumps([a.model_dump() for a in playbook.actions]),
+                    "approval_required": playbook.approval_required,
+                    "timeout_seconds": playbook.timeout_seconds,
+                    "trigger_conditions": json.dumps(playbook.trigger_conditions or {}),
+                    "created_by": "api",
+                },
+            )
+            await session.commit()
 
         return {
             "success": True,
@@ -574,10 +885,7 @@ async def get_playbook(playbook_id: str):
 
 @app.post("/api/v1/playbooks/execute", response_model=Dict[str, Any])
 async def execute_playbook_api(
-    playbook_id: str,
-    alert_id: str,
-    input_data: Dict[str, Any] = None,
-    background_tasks: BackgroundTasks = None,
+    request: PlaybookExecuteRequest, background_tasks: BackgroundTasks = None
 ):
     """
     Start playbook execution via API.
@@ -589,11 +897,15 @@ async def execute_playbook_api(
     """
     try:
         # Check if playbook exists
-        if playbook_id not in playbooks:
-            raise HTTPException(status_code=404, detail=f"Playbook not found: {playbook_id}")
+        if request.playbook_id not in playbooks:
+            raise HTTPException(
+                status_code=404, detail=f"Playbook not found: {request.playbook_id}"
+            )
 
         # Start execution
-        execution = start_playbook_execution(playbook_id, alert_id, input_data or {})
+        execution = start_playbook_execution(
+            request.playbook_id, request.alert_id, request.input_data
+        )
 
         return {
             "success": True,
@@ -620,12 +932,13 @@ async def list_executions(
 ):
     """List playbook executions."""
     executions = list(active_executions.values())
-
-    if status:
-        executions = [e for e in executions if e.status == status]
-
-    if playbook_id:
-        executions = [e for e in executions if e.playbook_id == playbook_id]
+    if not executions:
+        executions = await fetch_playbook_executions_from_db(status, playbook_id)
+    else:
+        if status:
+            executions = [e for e in executions if e.status == status]
+        if playbook_id:
+            executions = [e for e in executions if e.playbook_id == playbook_id]
 
     return {
         "success": True,
@@ -639,7 +952,32 @@ async def get_execution(execution_id: str):
     """Get a specific playbook execution."""
     execution = active_executions.get(execution_id)
     if not execution:
-        raise HTTPException(status_code=404, detail=f"Execution not found: {execution_id}")
+        async with db_manager.get_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT execution_id, playbook_id, trigger_alert_id, status, started_at, completed_at,
+                           current_action, current_action_index
+                    FROM playbook_executions
+                    WHERE execution_id = :execution_id
+                    """
+                ),
+                {"execution_id": execution_id},
+            )
+            row = result.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Execution not found: {execution_id}")
+        execution = PlaybookExecution(
+            execution_id=row.execution_id,
+            playbook_id=row.playbook_id,
+            trigger_alert_id=row.trigger_alert_id,
+            status=WorkflowStatus(row.status),
+            started_at=row.started_at,
+            completed_at=row.completed_at,
+            current_action=row.current_action,
+            current_action_index=row.current_action_index,
+            results=[],
+        )
 
     return {
         "success": True,
@@ -662,9 +1000,12 @@ async def approve_execution(execution_id: str, approver: str, comments: Optional
 
     execution.approval_status = "approved"
     execution.approved_by = approver
+    if comments:
+        execution.error = comments
 
     # Resume execution
     asyncio.create_task(execute_playbook(execution))
+    asyncio.create_task(persist_playbook_execution(execution))
 
     return {
         "success": True,
@@ -687,6 +1028,7 @@ async def cancel_execution(execution_id: str):
 
     execution.status = WorkflowStatus.CANCELLED
     execution.completed_at = datetime.utcnow()
+    asyncio.create_task(persist_playbook_execution(execution))
 
     return {
         "success": True,

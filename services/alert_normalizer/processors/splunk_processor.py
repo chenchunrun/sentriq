@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from shared.models.alert import AlertType, SecurityAlert, Severity
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now, utc_now_iso
 
 logger = get_logger(__name__)
 
@@ -96,36 +97,41 @@ class SplunkProcessor:
             ValueError: If required fields are missing or invalid
         """
         try:
+            alert_data = self._extract_payload(raw_alert)
+
             # Extract core fields
-            alert_id = self._extract_alert_id(raw_alert)
-            timestamp = self._extract_timestamp(raw_alert)
-            alert_type = self._extract_alert_type(raw_alert)
-            severity = self._extract_severity(raw_alert)
-            description = self._extract_description(raw_alert)
+            alert_id = self._extract_alert_id(alert_data)
+            timestamp = self._extract_timestamp(alert_data)
+            alert_type = self._extract_alert_type(alert_data)
+            severity = self._extract_severity(alert_data)
+            description = self._extract_description(alert_data)
 
             # Extract network information
-            source_ip = self._extract_field(raw_alert, ["src_ip", "source_ip", "src", "src_address"])
-            target_ip = self._extract_field(raw_alert, ["dest_ip", "destination_ip", "dest", "dst_ip", "dest_address"])
-            source_port = self._extract_port(raw_alert, ["src_port", "source_port"])
-            destination_port = self._extract_port(raw_alert, ["dest_port", "destination_port", "dst_port"])
-            protocol = self._extract_field(raw_alert, ["protocol", "transport"])
+            source_ip = self._extract_field(alert_data, ["src_ip", "source_ip", "src", "src_address"])
+            target_ip = self._extract_field(alert_data, ["dest_ip", "destination_ip", "dest", "dst_ip", "dest_address"])
+            source_port = self._extract_port(alert_data, ["src_port", "source_port"])
+            destination_port = self._extract_port(alert_data, ["dest_port", "destination_port", "dst_port"])
+            protocol = self._extract_field(alert_data, ["protocol", "transport"])
 
             # Extract entity references
-            asset_id = self._extract_field(raw_alert, ["asset_id", "asset", "host", "hostname", "dest_host"])
-            user_id = self._extract_field(raw_alert, ["user_id", "user", "username", "account", "dest_user"])
+            asset_id = self._extract_field(alert_data, ["asset_id", "asset", "host", "hostname", "dest_host"])
+            user_id = self._extract_field(alert_data, ["user_id", "user", "username", "account", "dest_user"])
 
             # Extract threat-specific fields
-            file_hash = self._extract_file_hash(raw_alert)
-            url = self._extract_field(raw_alert, ["url", "uri", "domain", "dest_url"])
-            process_name = self._extract_field(raw_alert, ["process_name", "process", "proc_name"])
-            process_id = self._extract_field(raw_alert, ["process_id", "pid"])
+            file_hash = self._extract_file_hash(alert_data)
+            url = self._extract_field(alert_data, ["url", "uri", "domain", "dest_url"])
+            process_name = self._extract_field(alert_data, ["process_name", "process", "proc_name"])
+            process_id = self._extract_field(alert_data, ["process_id", "pid"])
 
             # Extract Splunk-specific metadata
-            source = raw_alert.get("source", "splunk")
-            source_ref = raw_alert.get("search_id", raw_alert.get("result_id", ""))
+            source = alert_data.get("source", raw_alert.get("source", "splunk"))
+            source_ref = alert_data.get(
+                "search_id",
+                alert_data.get("result_id", raw_alert.get("search_id", raw_alert.get("result_id", ""))),
+            )
 
             # Extract IOCs
-            iocs = self._extract_iocs(raw_alert)
+            iocs = self._extract_iocs(alert_data)
 
             # Create normalized alert
             normalized_alert = SecurityAlert(
@@ -145,10 +151,10 @@ class SplunkProcessor:
                 raw_data=raw_alert,
                 normalized_data={
                     "source_type": "splunk",
-                    "normalized_at": datetime.utcnow().isoformat(),
-                    "splunk_search": raw_alert.get("search_name", ""),
-                    "splunk_app": raw_alert.get("app", ""),
-                    "splunk_owner": raw_alert.get("owner", ""),
+                    "normalized_at": utc_now_iso(),
+                    "splunk_search": alert_data.get("search_name", ""),
+                    "splunk_app": alert_data.get("app", ""),
+                    "splunk_owner": alert_data.get("owner", ""),
                     "iocs_extracted": iocs,
                 },
             )
@@ -170,6 +176,13 @@ class SplunkProcessor:
             self.error_count += 1
             logger.error(f"Failed to process Splunk alert: {e}", exc_info=True)
             raise ValueError(f"Splunk alert processing failed: {str(e)}")
+
+    def _extract_payload(self, raw_alert: Dict[str, Any]) -> Dict[str, Any]:
+        """Unwrap common Splunk envelope formats."""
+        payload = raw_alert.get("result")
+        if isinstance(payload, dict):
+            return payload
+        return raw_alert
 
     def _extract_alert_id(self, raw_alert: Dict[str, Any]) -> str:
         """Extract alert ID from Splunk alert."""
@@ -235,7 +248,7 @@ class SplunkProcessor:
                             continue
 
         # Default to current time if no valid timestamp found
-        return datetime.utcnow()
+        return utc_now().replace(tzinfo=None)
 
     def _extract_alert_type(self, raw_alert: Dict[str, Any]) -> AlertType:
         """Extract and map alert type from Splunk alert."""

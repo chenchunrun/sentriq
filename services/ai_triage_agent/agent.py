@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now_iso
 from .prompts import PromptTemplates
 from .risk_scoring import RiskScoringEngine
 
@@ -386,7 +387,7 @@ class AITriageAgent:
             "model_version": "v1.0",
             "processing_time_ms": None,  # Could be calculated if needed
             "breakdown": risk_assessment.get("breakdown", {}),
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": utc_now_iso(),
         }
 
     def _extract_key_findings(self, ai_analysis: Dict) -> List[str]:
@@ -538,7 +539,7 @@ class AITriageAgent:
             },
             "model_used": "fallback",
             "error": error,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": utc_now_iso(),
         }
 
     async def close(self):

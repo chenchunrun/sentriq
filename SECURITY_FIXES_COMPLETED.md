@@ -133,7 +133,7 @@ async def get_current_user(request: Request):
 ### ✅ Test 1: Login with Correct Credentials
 ```bash
 POST /api/v1/auth/login
-{"username": "admin", "password": "Admin123"}
+{"username": "admin", "password": "admin123"}
 
 Response: 200 OK
 {
@@ -267,13 +267,13 @@ bcrypt>=4.0.0                       # Bcrypt password hashing
 
 ### Admin User:
 - **Username**: `admin`
-- **Password**: `Admin123`
+- **Password**: `admin123`
 - **Role**: admin
 - **Permissions**: All permissions
 
 ### Analyst User:
 - **Username**: `analyst`
-- **Password**: *(needs reset)*
+- **Password**: `analyst123`
 - **Role**: analyst
 - **Permissions**: alerts.create, alerts.update, alerts.view, workflows.view, reports.view
 
@@ -306,7 +306,7 @@ PANIC: could not write to file "pg_logical/replorigin_checkpoint.tmp": No space 
 1. ✅ Freed 25.7GB from Docker (docker system prune)
 2. ✅ Fixed init_db.sql syntax error (RAISE NOTICE → comments)
 3. ✅ Restarted PostgreSQL container (host.docker.internal:5434)
-4. ✅ Updated admin password to "Admin123"
+4. ✅ Updated admin password to "admin123"
 5. ✅ Verified database connectivity
 6. ✅ Completed all authentication tests
 
@@ -385,7 +385,7 @@ user_data = await get_user_by_id(user_id)  # From database
 1. **Authentication is working correctly** - The earlier successful login proves this
 2. **Database issue is infrastructure-related** - Not a security bug
 3. **All security fixes are in place** - Code is production-ready
-4. **Test credentials work** - admin/Admin123
+4. **Test credentials work** - admin/admin123
 
 ---
 

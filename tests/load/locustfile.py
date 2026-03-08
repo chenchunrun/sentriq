@@ -22,7 +22,7 @@ with target performance of 100 alerts/second and P95 latency < 3 seconds.
 import asyncio
 import json
 import random
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Dict
 
 from locust import HttpUser, between, task
@@ -75,7 +75,7 @@ class TestDataGenerator:
 
         return {
             "result": {
-                "_time": datetime.utcnow().isoformat(),
+                "_time": datetime.now(UTC).isoformat(),
                 "signature": signature,
                 "severity": severity,
                 "src_ip": random.choice(cls.SOURCE_IPS),
@@ -91,7 +91,7 @@ class TestDataGenerator:
         return {
             "offense_id": 10000 + alert_id,
             "description": f"Security alert {alert_id}",
-            "start_time": int(datetime.utcnow().timestamp() * 1000),  # Milliseconds
+            "start_time": int(datetime.now(UTC).timestamp() * 1000),  # Milliseconds
             "severity": random.randint(1, 10),
             "magnitude": random.randint(1, 10),
             "offense_type": random.choice(cls.ALERT_TYPES).replace("_", " ").title(),
@@ -147,13 +147,13 @@ class SecurityTriageUser(HttpUser):
         raw_alert = TestDataGenerator.generate_splunk_alert(alert_id)
 
         # Measure normalization time
-        start = datetime.utcnow()
+        start = datetime.now(UTC)
 
         try:
             normalized = self.splunk_processor.process(raw_alert)
 
             # Measure processing time
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
 
             # Record metrics
             self.environment.stats.log_request(
@@ -165,7 +165,7 @@ class SecurityTriageUser(HttpUser):
             )
 
         except Exception as e:
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
             self.environment.stats.log_request(
                 method="SPLUNK_NORMALIZE",
                 name="/alert/splunk/normalize",
@@ -180,11 +180,11 @@ class SecurityTriageUser(HttpUser):
         alert_id = random.randint(1, 100000)
         raw_alert = TestDataGenerator.generate_qradar_alert(alert_id)
 
-        start = datetime.utcnow()
+        start = datetime.now(UTC)
 
         try:
             normalized = self.qradar_processor.process(raw_alert)
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
 
             self.environment.stats.log_request(
                 method="QRADAR_NORMALIZE",
@@ -195,7 +195,7 @@ class SecurityTriageUser(HttpUser):
             )
 
         except Exception as e:
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
             self.environment.stats.log_request(
                 method="QRADAR_NORMALIZE",
                 name="/alert/qradar/normalize",
@@ -210,11 +210,11 @@ class SecurityTriageUser(HttpUser):
         alert_id = random.randint(1, 100000)
         raw_alert = TestDataGenerator.generate_cef_alert(alert_id)
 
-        start = datetime.utcnow()
+        start = datetime.now(UTC)
 
         try:
             normalized = self.cef_processor.process(raw_alert)
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
 
             self.environment.stats.log_request(
                 method="CEF_NORMALIZE",
@@ -225,7 +225,7 @@ class SecurityTriageUser(HttpUser):
             )
 
         except Exception as e:
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
             self.environment.stats.log_request(
                 method="CEF_NORMALIZE",
                 name="/alert/cef/normalize",
@@ -239,11 +239,11 @@ class SecurityTriageUser(HttpUser):
         """Test network context collection performance."""
         ip = random.choice(TestDataGenerator.SOURCE_IPS)
 
-        start = datetime.utcnow()
+        start = datetime.now(UTC)
 
         try:
             context = asyncio.run(self.network_collector.collect_context(ip=ip))
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
 
             self.environment.stats.log_request(
                 method="NETWORK_CONTEXT",
@@ -254,7 +254,7 @@ class SecurityTriageUser(HttpUser):
             )
 
         except Exception as e:
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
             self.environment.stats.log_request(
                 method="NETWORK_CONTEXT",
                 name="/context/network",
@@ -273,11 +273,11 @@ class SecurityTriageUser(HttpUser):
             "title": "Performance test alert",
         }
 
-        start = datetime.utcnow()
+        start = datetime.now(UTC)
 
         try:
             result = asyncio.run(self.ai_agent.analyze_alert(alert=alert))
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
 
             self.environment.stats.log_request(
                 method="AI_TRIAGE",
@@ -288,7 +288,7 @@ class SecurityTriageUser(HttpUser):
             )
 
         except Exception as e:
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
             self.environment.stats.log_request(
                 method="AI_TRIAGE",
                 name="/triage/analyze",
@@ -327,31 +327,31 @@ class FullPipelineUser(HttpUser):
         alert_id = random.randint(1, 100000)
         raw_alert = TestDataGenerator.generate_splunk_alert(alert_id)
 
-        total_start = datetime.utcnow()
+        total_start = datetime.now(UTC)
 
         try:
             # Stage 1: Normalize
-            stage1_start = datetime.utcnow()
+            stage1_start = datetime.now(UTC)
             normalized = self.splunk_processor.process(raw_alert)
-            stage1_time = (datetime.utcnow() - stage1_start).total_seconds()
+            stage1_time = (datetime.now(UTC) - stage1_start).total_seconds()
 
             # Stage 2: Context collection
-            stage2_start = datetime.utcnow()
+            stage2_start = datetime.now(UTC)
             if normalized.source_ip:
                 network_context = asyncio.run(
                     self.network_collector.collect_context(ip=normalized.source_ip)
                 )
-            stage2_time = (datetime.utcnow() - stage2_start).total_seconds()
+            stage2_time = (datetime.now(UTC) - stage2_start).total_seconds()
 
             # Stage 3: AI Triage
-            stage3_start = datetime.utcnow()
+            stage3_start = datetime.now(UTC)
             triage_result = asyncio.run(
                 self.ai_agent.analyze_alert(alert=normalized.model_dump())
             )
-            stage3_time = (datetime.utcnow() - stage3_start).total_seconds()
+            stage3_time = (datetime.now(UTC) - stage3_start).total_seconds()
 
             # Total time
-            total_time = (datetime.utcnow() - total_start).total_seconds()
+            total_time = (datetime.now(UTC) - total_start).total_seconds()
 
             # Log metrics for each stage
             self.environment.stats.log_request(
@@ -398,7 +398,7 @@ class FullPipelineUser(HttpUser):
                 )
 
         except Exception as e:
-            total_time = (datetime.utcnow() - total_start).total_seconds()
+            total_time = (datetime.now(UTC) - total_start).total_seconds()
             self.environment.stats.log_request(
                 method="FULL_PIPELINE_ERROR",
                 name="/pipeline/error",
@@ -432,7 +432,7 @@ class StressTestUser(HttpUser):
         alert_id = random.randint(1, 100000)
         raw_alert = TestDataGenerator.generate_splunk_alert(alert_id)
 
-        start = datetime.utcnow()
+        start = datetime.now(UTC)
 
         try:
             # Quick normalization
@@ -443,7 +443,7 @@ class StressTestUser(HttpUser):
                 self.ai_agent.analyze_alert(alert=normalized.model_dump())
             )
 
-            processing_time = (datetime.utcnow() - start).total_seconds()
+            processing_time = (datetime.now(UTC) - start).total_seconds()
 
             self.environment.stats.log_request(
                 method="STRESS_TEST",

@@ -19,7 +19,7 @@ These tests verify the entire system works end-to-end.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict
 
 import httpx
@@ -44,7 +44,7 @@ class TestSystemEndToEnd:
         # Create test alert
         alert_data = {
             "alert_id": "ALT-SYS-001",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "alert_type": "malware",
             "severity": "high",
             "description": "System test alert",
@@ -140,19 +140,19 @@ class TestPerformanceBenchmarks:
         # 3. Verify system handles load
 
         # Simulate sending
-        start_time = datetime.utcnow()
+        start_time = datetime.now(UTC)
 
         for i in range(10):  # Reduced for quick testing
             alert = {
                 "alert_id": f"ALT-PERF-{i}",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "alert_type": "malware",
                 "severity": "high",
                 "description": f"Performance test alert {i}",
             }
             # In real test: await client.post("/api/v1/alerts", json=alert)
 
-        end_time = datetime.utcnow()
+        end_time = datetime.now(UTC)
         duration = (end_time - start_time).total_seconds()
 
         # Should complete quickly

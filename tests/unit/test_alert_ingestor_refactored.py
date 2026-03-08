@@ -16,18 +16,10 @@
 Unit tests for Alert Ingestor service.
 
 Refactored to use mock AppConfig to avoid validation errors.
-
-NOTE: These tests are currently skipped due to Starlette/FastAPI version incompatibility.
-To fix: Upgrade test dependencies to match requirements.txt (FastAPI 0.115.0+)
 """
 
-import pytest
-
-# Skip entire module due to TestClient compatibility issues
-pytestmark = pytest.mark.skip(reason="TestClient compatibility issue - requires FastAPI 0.115.0+")
-
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -61,6 +53,21 @@ class TestAlertIngestorAPI:
             db_instance = MagicMock()
             db_instance.initialize = AsyncMock()
             db_instance.close = AsyncMock()
+            db_instance.health_check = AsyncMock(return_value=True)
+
+            session = MagicMock()
+            session.execute = AsyncMock()
+            session.commit = AsyncMock()
+
+            result = MagicMock()
+            result.fetchone = MagicMock(return_value=None)
+            session.execute.return_value = result
+
+            session_context = MagicMock()
+            session_context.__aenter__ = AsyncMock(return_value=session)
+            session_context.__aexit__ = AsyncMock(return_value=None)
+            db_instance.get_session = MagicMock(return_value=session_context)
+
             mock.return_value = db_instance
             yield db_instance
 
@@ -68,9 +75,12 @@ class TestAlertIngestorAPI:
     def client(self, mock_publisher, mock_db):
         """Create test client with all mocks in place."""
         # Import AFTER environment is set
-        from services.alert_ingestor.main import app
+        import services.alert_ingestor.main as alert_ingestor_main
 
-        return TestClient(app)
+        alert_ingestor_main.db_manager = mock_db
+        alert_ingestor_main.message_publisher = mock_publisher
+
+        return TestClient(alert_ingestor_main.app)
 
     def test_health_check(self, client):
         """Test health check endpoint."""
@@ -85,7 +95,7 @@ class TestAlertIngestorAPI:
         """Test successful alert ingestion."""
         alert_data = {
             "alert_id": "ALT-TEST-001",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "alert_type": "malware",
             "severity": "high",
             "description": "Test alert",
@@ -123,7 +133,7 @@ class TestAlertIngestorAPI:
             "alerts": [
                 {
                     "alert_id": f"ALT-BATCH-{i}",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                     "alert_type": "malware",
                     "severity": "high",
                     "description": f"Batch alert {i}",
@@ -137,8 +147,8 @@ class TestAlertIngestorAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
-        assert "accepted" in data["data"]
-        assert data["data"]["accepted"] == 3
+        assert data["data"]["successful"] == 3
+        assert data["data"]["failed"] == 0
 
     def test_get_alert_status(self, client):
         """Test getting alert status."""
@@ -162,7 +172,7 @@ class TestAlertIngestorLogic:
 
         alert = SecurityAlert(
             alert_id="ALT-MSG-TEST",
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(UTC),
             alert_type=AlertType.MALWARE,
             severity=Severity.HIGH,
             description="Test",

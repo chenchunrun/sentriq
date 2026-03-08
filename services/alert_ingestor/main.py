@@ -19,6 +19,7 @@ Receives security alerts from multiple sources and publishes to message queue.
 """
 
 import asyncio
+import json
 import os
 import uuid
 from collections import defaultdict
@@ -40,7 +41,7 @@ from shared.models import (
     SecurityAlert,
     SuccessResponse,
 )
-from shared.utils import Config, get_logger
+from shared.utils import Config, get_logger, utc_now, utc_now_iso
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -65,6 +66,18 @@ RATE_LIMIT_REQUESTS = 100
 RATE_LIMIT_WINDOW = 60  # seconds
 
 
+def create_alert_message(alert: SecurityAlert, message_id: str | None = None) -> Dict[str, object]:
+    """Create a queue message payload for a security alert."""
+    msg_id = message_id or str(uuid.uuid4())
+    return {
+        "message_id": msg_id,
+        "message_type": "alert.raw",
+        "correlation_id": alert.alert_id,
+        "timestamp": utc_now_iso(),
+        "payload": alert.model_dump(mode="json"),
+    }
+
+
 async def check_rate_limit(request: Request) -> None:
     """
     Check rate limit for client IP.
@@ -72,11 +85,12 @@ async def check_rate_limit(request: Request) -> None:
     Allows 100 requests per minute per IP.
     """
     client_ip = request.client.host
-    now = datetime.utcnow()
+    now = utc_now().replace(tzinfo=None)
 
     # Clean old entries
+    recent_requests = rate_limit_tracker.get(client_ip, [])
     rate_limit_tracker[client_ip] = [
-        ts for ts in rate_limit_tracker[client_ip] if (now - ts).total_seconds() < RATE_LIMIT_WINDOW
+        ts for ts in recent_requests if (now - ts).total_seconds() < RATE_LIMIT_WINDOW
     ]
 
     # Check limit
@@ -170,7 +184,7 @@ async def health_check():
         return {
             "status": "healthy",
             "service": "alert-ingestor",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now_iso(),
             "checks": {
                 "database": db_health,
                 "message_queue": "connected" if message_publisher else "disconnected",
@@ -228,9 +242,10 @@ async def ingest_alert(request: Request, alert: SecurityAlert):
             await session.execute(
                 text("""
                     INSERT INTO alerts (alert_id, received_at, alert_type, severity, description,
-                                      source_ip, destination_ip, file_hash, url, asset_id, user_name)
+                                      source_ip, destination_ip, file_hash, url, asset_id, user_name, raw_data)
                     VALUES (:alert_id, :received_at, :alert_type, :severity, :description,
-                            :source_ip, :destination_ip, :file_hash, :url, :asset_id, :user_name)
+                            :source_ip, :destination_ip, :file_hash, :url, :asset_id, :user_name,
+                            CAST(:raw_data AS jsonb))
                 """),
                 {
                     "alert_id": alert.alert_id,
@@ -244,6 +259,9 @@ async def ingest_alert(request: Request, alert: SecurityAlert):
                     "url": alert.url,
                     "asset_id": alert.asset_id,
                     "user_name": alert.user_id,
+                    "raw_data": json.dumps(
+                        alert.raw_data if alert.raw_data is not None else alert.model_dump(mode="json")
+                    ),
                 }
             )
             await session.commit()
@@ -253,9 +271,9 @@ async def ingest_alert(request: Request, alert: SecurityAlert):
             "message_id": ingestion_id,
             "message_type": "alert.raw",
             "correlation_id": alert.alert_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now_iso(),
             "version": "1.0",
-            "payload": alert.model_dump(),
+            "payload": alert.model_dump(mode="json"),
         }
 
         # Publish to message queue
@@ -284,7 +302,7 @@ async def ingest_alert(request: Request, alert: SecurityAlert):
                 "message": "Alert queued for processing",
             },
             meta=ResponseMeta(
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now().replace(tzinfo=None),
                 request_id=ingestion_id,
             ),
         )
@@ -336,7 +354,7 @@ async def ingest_alert_batch(batch: AlertBatch):
                     "message_type": "alert.raw",
                     "correlation_id": alert.alert_id,
                     "batch_id": batch.batch_id,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": utc_now_iso(),
                     "payload": alert.model_dump(),
                 }
 
@@ -369,7 +387,7 @@ async def ingest_alert_batch(batch: AlertBatch):
                 "errors": errors if errors else None,
             },
             meta=ResponseMeta(
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now().replace(tzinfo=None),
                 request_id=batch.batch_id,
             ),
         )
@@ -398,15 +416,34 @@ async def get_alert_status(alert_id: str):
     Returns:
         Alert status information
     """
-    # TODO: Implement actual status lookup from database
+    async with db_manager.get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT status, updated_at, received_at
+                FROM alerts
+                WHERE alert_id = :alert_id
+                """
+            ),
+            {"alert_id": alert_id},
+        )
+        row = result.fetchone()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Alert {alert_id} not found",
+        )
+
     return SuccessResponse(
         data={
             "alert_id": alert_id,
-            "status": "processing",
-            "message": "Alert is being processed",
+            "status": row.status,
+            "received_at": row.received_at.isoformat() if row.received_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         },
         meta=ResponseMeta(
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now().replace(tzinfo=None),
             request_id=str(uuid.uuid4()),
         ),
     )

@@ -29,6 +29,7 @@ class LLMProvider(str, Enum):
 
     DEEPSEEK = "deepseek"
     QWEN = "qwen"
+    ZHIPU = "zhipu"
 
 
 class LLMModel(str, Enum):
@@ -42,6 +43,11 @@ class LLMModel(str, Enum):
     QWEN3_MAX = "qwen3-max"
     QWEN3_PLUS = "qwen3-plus"
     QWEN3_TURBO = "qwen3-turbo"
+
+    # Zhipu (GLM) models
+    ZHIPU_GLM_4 = "glm-4"
+    ZHIPU_GLM_4_PLUS = "glm-4-plus"
+    ZHIPU_GLM_4_AIR = "glm-4-air"
 
 
 class TaskType(str, Enum):

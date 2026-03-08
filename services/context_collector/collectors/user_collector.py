@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now, utc_now_iso
 
 logger = get_logger(__name__)
 
@@ -69,7 +70,7 @@ class UserCollector:
         # Build user context
         context = {
             "user_id": user_id,
-            "collected_at": datetime.utcnow().isoformat(),
+            "collected_at": utc_now_iso(),
         }
 
         # Query directory service
@@ -235,7 +236,7 @@ class UserCollector:
         """Get value from cache if not expired."""
         if key in self.cache:
             data, expiry = self.cache[key]
-            if datetime.utcnow() < expiry:
+            if utc_now() < expiry:
                 return data
             else:
                 del self.cache[key]
@@ -243,7 +244,7 @@ class UserCollector:
 
     def _put_in_cache(self, key: str, data: Any):
         """Put value in cache with expiry time."""
-        expiry = datetime.utcnow() + self.cache_ttl
+        expiry = utc_now() + self.cache_ttl
         self.cache[key] = (data, expiry)
 
     async def collect_batch_context(self, user_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -268,7 +269,7 @@ class UserCollector:
                 context_map[user_id] = {
                     "user_id": user_id,
                     "error": str(result),
-                    "collected_at": datetime.utcnow().isoformat(),
+                    "collected_at": utc_now_iso(),
                 }
             else:
                 context_map[user_id] = result
@@ -287,7 +288,7 @@ class UserCollector:
             "cache_ttl_seconds": int(self.cache_ttl.total_seconds()),
             "expired_entries": sum(
                 1 for _, expiry in self.cache.values()
-                if datetime.utcnow() >= expiry
+                if utc_now() >= expiry
             ),
         }
 

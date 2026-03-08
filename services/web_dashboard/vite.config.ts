@@ -11,17 +11,37 @@ export default defineConfig({
     },
   },
   server: {
-    port: 8081,
+    port: 9000,
     host: '0.0.0.0',  // Listen on all interfaces
     proxy: {
+      '/api/v1/workflows': {
+        target: process.env.VITE_WORKFLOW_API_BASE_URL || 'http://127.0.0.1:8018',
+        changeOrigin: true,
+      },
+      '/api/v1/config': {
+        target: process.env.VITE_CONFIG_API_BASE_URL || 'http://127.0.0.1:9009',
+        changeOrigin: true,
+      },
+      '/api/v1/reports': {
+        target: process.env.VITE_REPORTS_API_BASE_URL || 'http://127.0.0.1:9010',
+        changeOrigin: true,
+      },
+      '/api/v1/playbooks': {
+        target: process.env.VITE_AUTOMATION_API_BASE_URL || 'http://127.0.0.1:9005',
+        changeOrigin: true,
+      },
+      '/api/v1/executions': {
+        target: process.env.VITE_AUTOMATION_API_BASE_URL || 'http://127.0.0.1:9005',
+        changeOrigin: true,
+      },
       // Proxy API requests to API Gateway
       '/api': {
-        target: process.env.VITE_API_BASE_URL || 'http://127.0.0.1:8080',
+        target: process.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
       // Proxy WebSocket requests
       '/ws': {
-        target: process.env.VITE_WS_BASE_URL || 'http://127.0.0.1:8080',
+        target: process.env.VITE_WS_BASE_URL || 'ws://127.0.0.1:8000',
         ws: true,
       },
     },

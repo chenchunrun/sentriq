@@ -492,7 +492,7 @@ class TestCompletePipelineIntegration:
         # Stage 4: AI triage
         risk_engine = RiskScoringEngine()
         risk_assessment = risk_engine.calculate_risk_score(
-            alert=normalized.dict(),
+            alert=normalized.model_dump(),
             threat_intel=threat_intel,
             network_context=network_context,
         )
@@ -528,7 +528,7 @@ class TestCompletePipelineIntegration:
         # Stage 4: AI triage
         risk_engine = RiskScoringEngine()
         risk_assessment = risk_engine.calculate_risk_score(
-            alert=normalized.dict(),
+            alert=normalized.model_dump(),
             threat_intel=threat_intel,
             network_context=network_context,
         )

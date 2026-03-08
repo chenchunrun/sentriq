@@ -239,8 +239,8 @@ CREATE TRIGGER update_remediation_actions_updated_at BEFORE UPDATE ON remediatio
 
 -- 6. Insert initial data (passwords are bcrypt hashes for 'admin123' and 'analyst123')
 INSERT INTO users (username, email, full_name, password_hash, role, is_active) VALUES
-('admin', 'admin@security.local', 'System Administrator', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY5NU7xIXU2bq4e', 'admin', true),
-('analyst', 'analyst@security.local', 'Security Analyst', '$2b$12$K2x.NHQzLJ8H9wJz5SHO1eSq6Tmw9tNSxIHIPkEB0mFNJhLyN9MLO', 'analyst', true)
+('admin', 'admin@security.local', 'System Administrator', '$2b$12$svOZMDNSYb.al8C8YJSwJOsVHCMzjl3fj5kI1cKHThH6kN.Eb/A8u', 'admin', true),
+('analyst', 'analyst@security.local', 'Security Analyst', '$2b$12$dPSYhAe/UjkkH4XuslF/ZuDS.B/4eJRVZS8rey4TOR7OaDD1C3AUy', 'analyst', true)
 ON CONFLICT (username) DO NOTHING;
 
 INSERT INTO assets (asset_id, asset_name, asset_type, ip_address, criticality, environment) VALUES
@@ -291,6 +291,124 @@ CREATE INDEX IF NOT EXISTS idx_workflow_templates_category ON workflow_templates
 -- Trigger for workflow_templates
 CREATE TRIGGER update_workflow_templates_updated_at BEFORE UPDATE ON workflow_templates
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- 9.1 Workflows Table
+CREATE TABLE IF NOT EXISTS workflows (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workflow_id VARCHAR(100) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    trigger_type VARCHAR(50) NOT NULL DEFAULT 'manual',
+    trigger_conditions JSONB,
+    status VARCHAR(50) NOT NULL DEFAULT 'draft',
+    priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+    steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+    total_executions INTEGER NOT NULL DEFAULT 0,
+    successful_executions INTEGER NOT NULL DEFAULT 0,
+    failed_executions INTEGER NOT NULL DEFAULT 0,
+    last_execution_at TIMESTAMP WITH TIME ZONE,
+    last_execution_status VARCHAR(50),
+    created_by VARCHAR(255) NOT NULL DEFAULT 'system',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflows_workflow_id ON workflows(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);
+CREATE INDEX IF NOT EXISTS idx_workflows_category ON workflows(category);
+
+CREATE TRIGGER update_workflows_updated_at BEFORE UPDATE ON workflows
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- 9.2 Workflow Executions Table
+CREATE TABLE IF NOT EXISTS workflow_executions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    execution_id VARCHAR(100) UNIQUE NOT NULL,
+    workflow_id VARCHAR(100) NOT NULL REFERENCES workflows(workflow_id) ON DELETE CASCADE,
+    trigger_type VARCHAR(50) NOT NULL,
+    trigger_reference VARCHAR(255),
+    status VARCHAR(50) NOT NULL DEFAULT 'running',
+    started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    duration_seconds INTEGER,
+    steps_execution JSONB,
+    result TEXT,
+    error_message TEXT,
+    executed_by VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_executions_execution_id ON workflow_executions(execution_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_id ON workflow_executions(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_executions_status ON workflow_executions(status);
+CREATE INDEX IF NOT EXISTS idx_workflow_executions_started_at ON workflow_executions(started_at);
+
+-- 9.3 Human Tasks Table
+CREATE TABLE IF NOT EXISTS human_tasks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    task_id VARCHAR(100) UNIQUE NOT NULL,
+    execution_id VARCHAR(100),
+    task_type VARCHAR(100) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    description TEXT NOT NULL,
+    assigned_to VARCHAR(255),
+    status VARCHAR(50) NOT NULL,
+    priority VARCHAR(20) NOT NULL,
+    due_date TIMESTAMP WITH TIME ZONE,
+    input_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    output_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_human_tasks_task_id ON human_tasks(task_id);
+CREATE INDEX IF NOT EXISTS idx_human_tasks_execution_id ON human_tasks(execution_id);
+CREATE INDEX IF NOT EXISTS idx_human_tasks_status ON human_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_human_tasks_assigned_to ON human_tasks(assigned_to);
+
+-- 10. Automation Playbooks Table
+CREATE TABLE IF NOT EXISTS automation_playbooks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    playbook_id VARCHAR(100) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    version VARCHAR(50),
+    actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    approval_required BOOLEAN DEFAULT false,
+    timeout_seconds INTEGER,
+    trigger_conditions JSONB,
+    created_by VARCHAR(255) DEFAULT 'system',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_automation_playbooks_playbook_id ON automation_playbooks(playbook_id);
+
+CREATE TRIGGER update_automation_playbooks_updated_at BEFORE UPDATE ON automation_playbooks
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- 10.1 Automation Playbook Executions Table
+CREATE TABLE IF NOT EXISTS playbook_executions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    execution_id VARCHAR(100) UNIQUE NOT NULL,
+    playbook_id VARCHAR(100) NOT NULL REFERENCES automation_playbooks(playbook_id) ON DELETE CASCADE,
+    trigger_alert_id VARCHAR(100),
+    status VARCHAR(50) NOT NULL DEFAULT 'running',
+    started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    current_action VARCHAR(100),
+    current_action_index INTEGER,
+    approval_status VARCHAR(50),
+    results JSONB NOT NULL DEFAULT '[]'::jsonb,
+    error_message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_playbook_executions_execution_id ON playbook_executions(execution_id);
+CREATE INDEX IF NOT EXISTS idx_playbook_executions_playbook_id ON playbook_executions(playbook_id);
+CREATE INDEX IF NOT EXISTS idx_playbook_executions_status ON playbook_executions(status);
 
 -- Insert default workflow templates
 INSERT INTO workflow_templates (template_id, name, description, category, steps, steps_count, estimated_time) VALUES
@@ -363,4 +481,4 @@ GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO triage_user;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO triage_user;
 
 -- Database initialization completed successfully
--- Default users: admin/Admin123, analyst/analyst123 (CHANGE THESE IN PRODUCTION!)
+-- Default users: admin/admin123, analyst/analyst123 (CHANGE THESE IN PRODUCTION!)

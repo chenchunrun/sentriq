@@ -39,6 +39,26 @@ services:
       - security-triage-network
     restart: unless-stopped
 
+  # Database schema initializer (idempotent)
+  db-init:
+    image: postgres:15-alpine
+    container_name: security-triage-db-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${DB_PASSWORD:-triage_password_change_me}
+    volumes:
+      - ./scripts/init_db.sql:/scripts/init_db.sql:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        psql -h postgres -U triage_user -d security_triage -f /scripts/init_db.sql
+    networks:
+      - security-triage-network
+    restart: "no"
+
   # Redis 7 - Cache and Session Store
   redis:
     image: redis:7-alpine
@@ -101,7 +121,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -116,8 +136,6 @@ services:
     networks:
       - security-triage-network
     restart: unless-stopped
-    profiles:
-      - monitoring
 
   # Grafana - Visualization Dashboard
   grafana:
@@ -129,7 +147,7 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_INSTALL_PLUGINS: ""
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
@@ -142,54 +160,52 @@ services:
     networks:
       - security-triage-network
     restart: unless-stopped
-    profiles:
-      - monitoring
 
   # Kong - API Gateway
-  kong:
-    image: kong/kong-gateway:3.5.0.0-alpine
-    container_name: security-triage-kong
-    environment:
-      # Databaseless (Declarative Config) Mode
-      KONG_DATABASE: "off"
-      KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
-      # DNS Resolver
-      KONG_DNS_RESOLVER: ${KONG_DNS_RESOLVER:-127.0.0.11}
-      # Proxy Ports
-      KONG_PROXY_ACCESS_LOG: /dev/stdout
-      KONG_PROXY_ERROR_LOG: /dev/stderr
-      KONG_ADMIN_ACCESS_LOG: /dev/stdout
-      KONG_ADMIN_ERROR_LOG: /dev/stderr
-      # Admin API
-      KONG_ADMIN_GUI_URL: http://localhost:8002
-      # NGINX
-      KONG_NGINX_WORKER_PROCESSES: "2"
-      # Plugins
-      KONG_PLUGINS: bundled,jwt,rate-limiting,acl,key-auth,prometheus,cors,request-size-limiting,request-transformer,response-transformer,file-log
-      KONG_PLUGINSERVER_NAMES: ""
-      # Anonymous Reports (disable)
-      KONG_ANONYMOUS_REPORTS: "off"
-    ports:
-      - "8000:8000"    # Proxy API (main entry point)
-      - "8443:8443"    # Proxy API (HTTPS)
-      - "8001:8001"    # Admin API
-      - "8444:8444"    # Admin API (HTTPS)
-      - "8002:8002"    # Kong Manager (GUI)
-      - "8445:8445"    # Kong Manager (HTTPS)
-    volumes:
-      - ./kong.yml:/kong/declarative/kong.yml:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "kong", "health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    networks:
-      - security-triage-network
-    restart: unless-stopped
+  # kong:
+  #   image: kong/kong-gateway:3.7
+  #   container_name: security-triage-kong
+  #   environment:
+  #     # Databaseless (Declarative Config) Mode
+  #     KONG_DATABASE: "off"
+  #     KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+  #     # DNS Resolver
+  #     KONG_DNS_RESOLVER: ${KONG_DNS_RESOLVER:-127.0.0.11}
+  #     # Proxy Ports
+  #     KONG_PROXY_ACCESS_LOG: /dev/stdout
+  #     KONG_PROXY_ERROR_LOG: /dev/stderr
+  #     KONG_ADMIN_ACCESS_LOG: /dev/stdout
+  #     KONG_ADMIN_ERROR_LOG: /dev/stderr
+  #     # Admin API
+  #     KONG_ADMIN_GUI_URL: http://localhost:8002
+  #     # NGINX
+  #     KONG_NGINX_WORKER_PROCESSES: "2"
+  #     # Plugins
+  #     KONG_PLUGINS: bundled,jwt,rate-limiting,acl,key-auth,prometheus,cors,request-size-limiting,request-transformer,response-transformer,file-log
+  #     KONG_PLUGINSERVER_NAMES: ""
+  #     # Anonymous Reports (disable)
+  #     KONG_ANONYMOUS_REPORTS: "off"
+  #   ports:
+  #     - "8000:8000"    # Proxy API (main entry point)
+  #     - "8443:8443"    # Proxy API (HTTPS)
+  #     - "8001:8001"    # Admin API
+  #     - "8444:8444"    # Admin API (HTTPS)
+  #     - "8002:8002"    # Kong Manager (GUI)
+  #     - "8445:8445"    # Kong Manager (HTTPS)
+  #   volumes:
+  #     - ./kong.yml:/kong/declarative/kong.yml:ro
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD", "kong", "health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #     start_period: 30s
+  #   networks:
+  #     - security-triage-network
+  #   restart: unless-stopped
 
   # =============================================================================
   # Stage 1: Core Ingestion Services
@@ -387,6 +403,9 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-internal-key-123}
       QWEN_BASE_URL: ${QWEN_BASE_URL:-http://internal-maas.qwen/v1}
       QWEN_API_KEY: ${QWEN_API_KEY:-internal-key-456}
+      ZHIPU_BASE_URL: ${ZHIPU_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      ZHIPU_API_KEY: ${ZHIPU_API_KEY:-your-zhipu-api-key}
+      LLM_MOCK_MODE: ${LLM_MOCK_MODE:-true}
       # Application
       HOST: 0.0.0.0
       PORT: 8000
@@ -437,6 +456,8 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-internal-key-123}
       QWEN_BASE_URL: ${QWEN_BASE_URL:-http://internal-maas.qwen/v1}
       QWEN_API_KEY: ${QWEN_API_KEY:-internal-key-456}
+      ZHIPU_BASE_URL: ${ZHIPU_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      ZHIPU_API_KEY: ${ZHIPU_API_KEY:-your-zhipu-api-key}
       # Application
       HOST: 0.0.0.0
       PORT: 8000
@@ -518,6 +539,12 @@ services:
       CHROMADB_PORT: ${CHROMADB_PORT:-8000}
       # Embedding Model
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      SIMILARITY_MOCK_MODE: ${SIMILARITY_MOCK_MODE:-true}
+      # Vectorization
+      VECTORIZE_ON_STARTUP: ${VECTORIZE_ON_STARTUP:-true}
+      VECTORIZE_LIMIT: ${VECTORIZE_LIMIT:-0}
+      VECTORIZE_BATCH: ${VECTORIZE_BATCH:-200}
+      CHROMA_PERSIST_PATH: ${CHROMA_PERSIST_PATH:-/app/data/chroma}
       # Security
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-to-a-random-secret-key-in-production}
       # Application
@@ -539,11 +566,11 @@ services:
       chromadb:
         condition: service_started
     healthcheck:
-      test: curl -f http://localhost:8000/health || exit 1
+      test: python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 180s
     networks:
       - security-triage-network
     restart: unless-stopped
@@ -565,6 +592,8 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0}
       # RabbitMQ
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:${RABBITMQ_PASSWORD:-rabbitmq_password_change_me}@rabbitmq:5672/}
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-to-a-random-secret-key-in-production}
       # Application
       HOST: 0.0.0.0
       PORT: 8000
@@ -604,6 +633,8 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0}
       # RabbitMQ
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:${RABBITMQ_PASSWORD:-rabbitmq_password_change_me}@rabbitmq:5672/}
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-to-a-random-secret-key-in-production}
       # Application
       HOST: 0.0.0.0
       PORT: 8000
@@ -649,6 +680,8 @@ services:
       SMTP_USER: ${SMTP_USER:-your-email@gmail.com}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-your-app-password}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/YOUR/WEBHOOK/URL}
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-to-a-random-secret-key-in-production}
       # Application
       HOST: 0.0.0.0
       PORT: 8000
@@ -803,8 +836,12 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://triage_user:${DB_PASSWORD:-triage_password_change_me}@postgres:5432/security_triage}
       # Redis
       REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0}
+      # RabbitMQ
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:${RABBITMQ_PASSWORD:-rabbitmq_password_change_me}@rabbitmq:5672/}
       # Prometheus
       PROMETHEUS_URL: ${PROMETHEUS_URL:-http://prometheus:9090}
+      # Security
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-to-a-random-secret-key-in-production}
       # Application
       HOST: 0.0.0.0
       PORT: 8000
@@ -828,8 +865,6 @@ services:
     networks:
       - security-triage-network
     restart: unless-stopped
-    profiles:
-      - monitoring
 
   # Web Dashboard (React Frontend)
   web-dashboard:
@@ -853,7 +888,11 @@ services:
       API_BASE_URL: ${API_BASE_URL:-http://localhost:8001}
       ANALYTICS_SERVICE_URL: ${ANALYTICS_SERVICE_URL:-http://data-analytics:8000}
       REPORTING_SERVICE_URL: ${REPORTING_SERVICE_URL:-http://reporting-service:8000}
+      NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://notification-service:8000}
       CONFIG_SERVICE_URL: ${CONFIG_SERVICE_URL:-http://configuration-service:8000}
+      LLM_ROUTER_URL: ${LLM_ROUTER_URL:-http://llm-router:8000}
+      WORKFLOW_SERVICE_URL: ${WORKFLOW_SERVICE_URL:-http://workflow-engine:8000}
+      AUTOMATION_SERVICE_URL: ${AUTOMATION_SERVICE_URL:-http://automation-orchestrator:8000}
       # Application
       HOST: 0.0.0.0
       PORT: 8000

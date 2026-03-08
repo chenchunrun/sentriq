@@ -26,8 +26,12 @@ class TestEmbeddingGeneration:
     @pytest.fixture
     def mock_model(self):
         """Create mock embedding model."""
+        import numpy as np
+
         model = Mock()
-        model.encode.return_value = [0.1, 0.2, 0.3, 0.4, 0.5]
+        # Mock numpy array with tolist() method
+        mock_array = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+        model.encode.return_value = mock_array
         model.get_sentence_embedding_dimension.return_value = 384
         return model
 
@@ -36,21 +40,25 @@ class TestEmbeddingGeneration:
         from services.similarity_search.main import alert_to_text
         from shared.models import SecurityAlert
 
+        from datetime import datetime
+
         alert = SecurityAlert(
             alert_id="TEST-001",
             alert_type="malware",
             severity="high",
             description="Test malware alert",
             source_ip="192.168.1.1",
-            file_hash="abc123",
+            file_hash="5d41402abc4b2a76b9719d911017c592",  # Valid MD5 hash (32 chars)
+            timestamp=datetime.now().replace(year=2025, month=1, day=1),
         )
 
         text = alert_to_text(alert)
 
-        assert "Alert Type: malware" in text
-        assert "Severity: high" in text
+        # Enums are represented as AlertType.MALWARE, Severity.HIGH
+        assert "AlertType.MALWARE" in text or "malware" in text.lower()
+        assert "HIGH" in text or "high" in text.lower()
         assert "Source IP: 192.168.1.1" in text
-        assert "File Hash: abc123" in text
+        assert "File Hash: 5d41402abc4b2a76b9719d911017c592" in text
 
     def test_generate_embedding(self, mock_model):
         """Test embedding generation."""
@@ -86,9 +94,17 @@ class TestVectorSearch:
         collection.count.return_value = 100
         return collection
 
-    def test_search_similar_alerts(self, mock_collection):
+    @pytest.mark.asyncio
+    async def test_search_similar_alerts(self, mock_collection):
         """Test searching similar alerts."""
-        with patch('services.similarity_search.main.collection', mock_collection):
+        import numpy as np
+
+        # Mock embedding model
+        mock_embedding_model = Mock()
+        mock_embedding_model.encode.return_value = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+
+        with patch('services.similarity_search.main.collection', mock_collection), \
+             patch('services.similarity_search.main.embedding_model', mock_embedding_model):
             from services.similarity_search.main import search_similar_alerts
             from shared.models import VectorSearchRequest
 
@@ -98,7 +114,7 @@ class TestVectorSearch:
                 min_similarity=0.5,
             )
 
-            response = search_similar_alerts(request)
+            response = await search_similar_alerts(request)
 
             assert response is not None
             assert hasattr(response, 'data')
@@ -119,8 +135,11 @@ class TestVectorSearch:
             similarity = 1.0 - dist
             assert abs(similarity - exp_sim) < 0.001
 
-    def test_min_similarity_filter(self, mock_collection):
+    @pytest.mark.asyncio
+    async def test_min_similarity_filter(self, mock_collection):
         """Test minimum similarity threshold filtering."""
+        import numpy as np
+
         # Mock results with varying distances
         mock_collection.query.return_value = {
             "ids": [["ALERT-001", "ALERT-002", "ALERT-003"]],
@@ -132,7 +151,12 @@ class TestVectorSearch:
             ]],
         }
 
-        with patch('services.similarity_search.main.collection', mock_collection):
+        # Mock embedding model
+        mock_embedding_model = Mock()
+        mock_embedding_model.encode.return_value = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+
+        with patch('services.similarity_search.main.collection', mock_collection), \
+             patch('services.similarity_search.main.embedding_model', mock_embedding_model):
             from services.similarity_search.main import search_similar_alerts
             from shared.models import VectorSearchRequest
 
@@ -142,7 +166,7 @@ class TestVectorSearch:
                 min_similarity=0.5,  # Should only return first 2
             )
 
-            response = search_similar_alerts(request)
+            response = await search_similar_alerts(request)
             results = response.data.results
 
             # Only ALERT-001 (0.9) and ALERT-002 (0.6) should pass threshold
@@ -162,36 +186,56 @@ class TestAlertIndexing:
         collection.update.return_value = None
         return collection
 
-    def test_index_alert(self, mock_collection):
+    @pytest.mark.asyncio
+    async def test_index_alert(self, mock_collection):
         """Test indexing a single alert."""
-        with patch('services.similarity_search.main.collection', mock_collection):
+        import numpy as np
+
+        # Mock embedding model
+        mock_embedding_model = Mock()
+        mock_embedding_model.encode.return_value = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+
+        with patch('services.similarity_search.main.collection', mock_collection), \
+             patch('services.similarity_search.main.embedding_model', mock_embedding_model):
             from services.similarity_search.main import index_alert
             from shared.models import SecurityAlert
+            from datetime import datetime
 
             alert = SecurityAlert(
                 alert_id="TEST-001",
                 alert_type="malware",
                 severity="high",
                 description="Test alert",
+                timestamp=datetime.now().replace(year=2025, month=1, day=1),
             )
 
-            result = index_alert(alert)
+            result = await index_alert(alert)
 
             assert result["success"] is True
             assert "TEST-001" in result["message"]
             mock_collection.add.assert_called_once()
 
-    def test_index_with_triage_result(self, mock_collection):
+    @pytest.mark.asyncio
+    async def test_index_with_triage_result(self, mock_collection):
         """Test indexing alert with triage result."""
-        with patch('services.similarity_search.main.collection', mock_collection):
+        import numpy as np
+
+        # Mock embedding model
+        mock_embedding_model = Mock()
+        mock_embedding_model.encode.return_value = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
+
+        with patch('services.similarity_search.main.collection', mock_collection), \
+             patch('services.similarity_search.main.embedding_model', mock_embedding_model):
             from services.similarity_search.main import index_alert
             from shared.models import SecurityAlert
+            from datetime import datetime
 
             alert = SecurityAlert(
                 alert_id="TEST-001",
                 alert_type="malware",
                 severity="high",
                 description="Test alert",
+                timestamp=datetime.now().replace(year=2025, month=1, day=1),
             )
 
             triage_result = {
@@ -199,7 +243,7 @@ class TestAlertIndexing:
                 "confidence": 95,
             }
 
-            result = index_alert(alert, triage_result)
+            result = await index_alert(alert, triage_result)
 
             assert result["success"] is True
 

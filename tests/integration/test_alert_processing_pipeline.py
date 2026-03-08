@@ -19,7 +19,7 @@ Tests the complete flow from alert ingestion to triage.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -62,7 +62,7 @@ class TestAlertProcessingPipeline:
         """Create sample alert for testing."""
         return {
             "alert_id": "ALT-INT-001",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "alert_type": "malware",
             "severity": "high",
             "description": "Integration test alert",
@@ -141,7 +141,7 @@ class TestWorkflowIntegration:
             workflow_id="alert-processing",
             status=WorkflowStatus.RUNNING,
             input={"alert_id": "ALT-001"},
-            started_at=datetime.utcnow(),
+            started_at=datetime.now(UTC),
         )
 
         assert execution.status == WorkflowStatus.RUNNING
@@ -152,7 +152,7 @@ class TestWorkflowIntegration:
             playbook_id="malware-response",
             trigger_alert_id="ALT-001",
             status=WorkflowStatus.RUNNING,
-            started_at=datetime.utcnow(),
+            started_at=datetime.now(UTC),
         )
 
         assert playbook_exec.playbook_id == "malware-response"

@@ -24,7 +24,11 @@ WORKDIR /frontend
 COPY ./services/web_dashboard/package.json ./
 
 # Install dependencies (npm install instead of ci since no package-lock.json exists)
-RUN npm install
+RUN npm config set registry https://registry.npmmirror.com && \
+    npm config set fetch-retries 3 && \
+    npm config set fetch-retry-mintimeout 10000 && \
+    npm config set fetch-retry-maxtimeout 60000 && \
+    npm install
 
 # Copy frontend source from project root
 COPY ./services/web_dashboard ./

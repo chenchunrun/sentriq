@@ -85,12 +85,12 @@ export const Alerts: React.FC = () => {
 
   // Bulk update mutation
   const bulkUpdateMutation = useMutation({
-    mutationFn: ({ alertIds, status }: { alertIds: string[]; status: string }) =>
-      fetch('/api/v1/alerts/bulk/status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ alert_ids: alertIds, status }),
-      }).then((res) => res.json()),
+    mutationFn: ({ alertIds, status }: { alertIds: string[]; status: string }) => {
+      if (status === 'resolved') {
+        return api.alerts.bulkAction(alertIds, 'close')
+      }
+      throw new Error(`Unsupported bulk action: ${status}`)
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['alerts'] })
       setSelectedAlerts(new Set())
@@ -137,25 +137,21 @@ export const Alerts: React.FC = () => {
 
   // Create alert mutation
   const createAlertMutation = useMutation({
-    mutationFn: async (alertData: typeof newAlert) => {
-      const response = await fetch('/api/v1/alerts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: alertData.title,
-          description: alertData.description,
-          severity: alertData.severity,
-          type: alertData.type,
-          source_ip: alertData.source_ip || undefined,
-          destination_ip: alertData.destination_ip || undefined,
+    mutationFn: async (alertData: typeof newAlert) =>
+      api.alerts.createAlert({
+        title: alertData.title,
+        description: alertData.description,
+        severity: alertData.severity as Alert['severity'],
+        alert_type: alertData.type as Alert['alert_type'],
+        source_ip: alertData.source_ip || undefined,
+        destination_ip: alertData.destination_ip || undefined,
+        metadata: {
           source_port: alertData.source_port || undefined,
           destination_port: alertData.destination_port || undefined,
           protocol: alertData.protocol || undefined,
-        }),
-      })
-      if (!response.ok) throw new Error('Failed to create alert')
-      return response.json()
-    },
+          source: 'web_dashboard',
+        },
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['alerts'] })
       setShowCreateModal(false)
@@ -232,6 +228,10 @@ export const Alerts: React.FC = () => {
   }
 
   const handleBulkAction = (status: string) => {
+    if (status !== 'resolved') {
+      alert('当前仅支持批量关闭/标记 resolved')
+      return
+    }
     if (window.confirm(`Update ${selectedAlerts.size} alerts to ${status}?`)) {
       bulkUpdateMutation.mutate({
         alertIds: Array.from(selectedAlerts),

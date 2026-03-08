@@ -26,6 +26,7 @@ from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from shared.utils.time import utc_now
 
 # Set test environment
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test_db")
@@ -82,7 +83,7 @@ class TestAlertLifecycle:
         # Step 1: Create security alert
         alert = SecurityAlert(
             alert_id="ALT-E2E-001",
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             alert_type=AlertType.MALWARE,
             severity=Severity.HIGH,
             description="E2E test malware alert",
@@ -151,7 +152,7 @@ class TestAlertLifecycle:
 
         alert = SecurityAlert(
             alert_id="ALT-ENRICH-001",
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             alert_type=AlertType.MALWARE,
             severity=Severity.HIGH,
             description="Test alert for enrichment",
@@ -189,7 +190,7 @@ class TestAlertLifecycle:
 
         alert = SecurityAlert(
             alert_id="ALT-TRIAGE-001",
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             alert_type=AlertType.MALWARE,
             severity=Severity.HIGH,
             description="Test alert for triage",
@@ -271,7 +272,7 @@ class TestWorkflowExecution:
 
         alert = SecurityAlert(
             alert_id="ALT-WF-001",
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             alert_type=AlertType.MALWARE,
             severity=Severity.CRITICAL,
             description="Critical malware alert",
@@ -285,7 +286,7 @@ class TestWorkflowExecution:
             workflow_id="malware-response",
             status=WorkflowStatus.RUNNING,
             input={"alert_id": alert.alert_id, "severity": alert.severity},
-            started_at=datetime.utcnow(),
+            started_at=utc_now(),
         )
 
         assert workflow.status == WorkflowStatus.RUNNING
@@ -302,7 +303,7 @@ class TestWorkflowExecution:
             playbook_id="malware-isolation",
             trigger_alert_id="ALT-AUTO-001",
             status=PlaybookStatus.RUNNING,
-            started_at=datetime.utcnow(),
+            started_at=utc_now(),
             actions=[
                 PlaybookAction(
                     action_id="action-001",
@@ -357,7 +358,7 @@ class TestDataFlow:
         print("Step 1: Alert Ingestion")
         alert = SecurityAlert(
             alert_id="ALT-PIPELINE-001",
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             alert_type=AlertType.MALWARE,
             severity=Severity.HIGH,
             description="E2E pipeline test alert",
@@ -426,7 +427,7 @@ class TestDataFlow:
                 workflow_id="automated-response",
                 status=WorkflowStatus.RUNNING,
                 input={"alert_id": alert.alert_id},
-                started_at=datetime.utcnow(),
+                started_at=utc_now(),
             )
             print(f"  ✓ Workflow triggered: {workflow.workflow_id}")
 
@@ -454,7 +455,7 @@ class TestPerformanceMetrics:
         # Simulate processing steps
         alert = SecurityAlert(
             alert_id="ALT-SLA-001",
-            timestamp=datetime.utcnow(),
+            timestamp=utc_now(),
             alert_type=AlertType.MALWARE,
             severity=Severity.HIGH,
             description="SLA test alert",
@@ -483,7 +484,7 @@ class TestPerformanceMetrics:
         for i in range(test_alerts):
             alert = SecurityAlert(
                 alert_id=f"ALT-THRPT-{i}",
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 alert_type=AlertType.MALWARE,
                 severity=Severity.HIGH,
                 description=f"Throughput test alert {i}",

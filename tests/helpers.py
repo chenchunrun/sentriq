@@ -22,6 +22,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, Mock
+from shared.utils.time import utc_now, utc_now_iso
 
 
 def create_mock_alert(
@@ -41,7 +42,7 @@ def create_mock_alert(
         "process_name": kwargs.get("process_name"),
         "asset_id": kwargs.get("asset_id", "SERVER-001"),
         "user_id": kwargs.get("user_id", "admin"),
-        "timestamp": kwargs.get("timestamp", datetime.utcnow().isoformat()),
+        "timestamp": kwargs.get("timestamp", utc_now_iso()),
         "raw_data": kwargs.get("raw_data", {}),
     }
 
@@ -61,7 +62,7 @@ def create_mock_triage_result(
         ),
         "iocs": kwargs.get("iocs", {"file_hashes": [], "ips": [], "domains": []}),
         "references": kwargs.get("references", []),
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": utc_now_iso(),
     }
 
 
@@ -69,7 +70,7 @@ def create_mock_enrichment(alert_id: str = "test-alert-001", **kwargs) -> Dict[s
     """Create a mock enrichment for testing."""
     return {
         "alert_id": alert_id,
-        "enriched_at": datetime.utcnow().isoformat(),
+        "enriched_at": utc_now_iso(),
         "enrichment_sources": ["source_network", "threat_intel"],
         "source_network": {
             "ip_address": kwargs.get("source_ip", "192.168.1.100"),
@@ -171,7 +172,7 @@ def mock_message_queue_message(
         "message_id": message_id or f"msg-{int(time.time() * 1000)}",
         "message_type": message_type,
         "correlation_id": payload.get("alert_id", "unknown"),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now_iso(),
         "version": "1.0",
         "payload": payload,
     }

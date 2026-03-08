@@ -24,17 +24,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install system dependencies
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources || \
+    sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources || \
+    sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
-COPY shared/requirements.txt /app/shared/requirements.txt
+COPY services/shared/requirements.txt /app/shared/requirements.txt
 RUN pip install --no-cache-dir -r /app/shared/requirements.txt
+COPY services/attack_chain_analyzer/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy shared modules
-COPY shared/ /app/shared/
+COPY services/shared/ /app/shared/
 
 # Copy service code
 COPY services/attack_chain_analyzer/ /app/services/attack_chain_analyzer/

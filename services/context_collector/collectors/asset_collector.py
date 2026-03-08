@@ -27,8 +27,16 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now, utc_now_iso
 
 logger = get_logger(__name__)
+
+
+class _BatchContextDict(dict):
+    """Compatibility wrapper: iterate over values while preserving key lookup."""
+
+    def __iter__(self):
+        return iter(self.values())
 
 
 class AssetCollector:
@@ -68,6 +76,14 @@ class AssetCollector:
         Returns:
             Dictionary with asset context information
         """
+        if not asset_id:
+            logger.warning("Missing asset_id for asset context collection")
+            return {
+                "asset_id": asset_id,
+                "collected_at": utc_now_iso(),
+                "error": "Missing asset identifier",
+            }
+
         # Check cache
         cache_key = f"asset:{asset_id}"
         cached_data = self._get_from_cache(cache_key)
@@ -78,7 +94,7 @@ class AssetCollector:
         # Build asset context
         context = {
             "asset_id": asset_id,
-            "collected_at": datetime.utcnow().isoformat(),
+            "collected_at": utc_now_iso(),
         }
 
         # Query CMDB for asset data
@@ -242,7 +258,7 @@ class AssetCollector:
         """Get value from cache if not expired."""
         if key in self.cache:
             data, expiry = self.cache[key]
-            if datetime.utcnow() < expiry:
+            if utc_now() < expiry:
                 return data
             else:
                 del self.cache[key]
@@ -250,7 +266,7 @@ class AssetCollector:
 
     def _put_in_cache(self, key: str, data: Any):
         """Put value in cache with expiry time."""
-        expiry = datetime.utcnow() + self.cache_ttl
+        expiry = utc_now() + self.cache_ttl
         self.cache[key] = (data, expiry)
 
     async def collect_batch_context(self, asset_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -268,14 +284,14 @@ class AssetCollector:
         tasks = [self.collect_context(asset_id) for asset_id in asset_ids]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        context_map = {}
+        context_map = _BatchContextDict()
         for asset_id, result in zip(asset_ids, results):
             if isinstance(result, Exception):
                 logger.error(f"Error collecting context for {asset_id}: {result}")
                 context_map[asset_id] = {
                     "asset_id": asset_id,
                     "error": str(result),
-                    "collected_at": datetime.utcnow().isoformat(),
+                    "collected_at": utc_now_iso(),
                 }
             else:
                 context_map[asset_id] = result
@@ -294,7 +310,7 @@ class AssetCollector:
             "cache_ttl_seconds": int(self.cache_ttl.total_seconds()),
             "expired_entries": sum(
                 1 for _, expiry in self.cache.values()
-                if datetime.utcnow() >= expiry
+                if utc_now() >= expiry
             ),
         }
 

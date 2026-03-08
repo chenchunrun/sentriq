@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from shared.utils.time import utc_now
 
 
 class RiskLevel(str, Enum):
@@ -177,7 +178,7 @@ class RiskAssessment(BaseModel):
 
     # Timestamps
     assessment_time: datetime = Field(
-        default_factory=datetime.utcnow, description="When assessment was performed"
+        default_factory=utc_now, description="When assessment was performed"
     )
 
     @field_validator("requires_human_review")
@@ -248,7 +249,7 @@ class TriageResult(BaseModel):
     requires_human_review: bool = Field(..., description="Whether human review is required")
     processing_time_ms: float = Field(..., ge=0.0, description="Processing time in milliseconds")
     triage_time: datetime = Field(
-        default_factory=datetime.utcnow, description="When triage was completed"
+        default_factory=utc_now, description="When triage was completed"
     )
 
     # Analyst interaction

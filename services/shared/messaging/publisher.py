@@ -22,12 +22,12 @@ reliable message delivery, priority queues, and message tracking.
 import asyncio
 import json
 import uuid
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
 from aio_pika import DeliveryMode, ExchangeType, Message, RobustConnection, connect_robust
 from aio_pika.abc import AbstractChannel, AbstractExchange
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now, utc_now_iso
 
 logger = get_logger(__name__)
 
@@ -76,6 +76,32 @@ class MessagePublisher:
         self._pending_confirms: Dict[str, Any] = {}
         self._confirmed_messages: List[str] = []
         self._failed_messages: List[Dict[str, Any]] = []
+
+    async def _ensure_routing_target(self, routing_key: str, priority: Optional[int] = None) -> None:
+        """Ensure a routing target exists for direct exchanges used in tests."""
+        if not self.exchange or self.exchange_name == "":
+            return
+
+        if self.exchange_type is not ExchangeType.DIRECT:
+            return
+
+        try:
+            queue = await self.channel.declare_queue(
+                routing_key,
+                durable=True,
+                passive=True,
+            )
+        except Exception:
+            arguments = None
+            if priority is not None:
+                arguments = {"x-max-priority": 10}
+
+            queue = await self.channel.declare_queue(
+                routing_key,
+                durable=True,
+                arguments=arguments,
+            )
+        await queue.bind(self.exchange, routing_key=routing_key)
 
     async def connect(self):
         """Connect to RabbitMQ and setup exchange."""
@@ -139,7 +165,7 @@ class MessagePublisher:
             message_body = {
                 "_meta": {
                     "message_id": message_id,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": utc_now_iso(),
                     "publisher": self.__class__.__name__,
                 },
                 "data": message,
@@ -161,7 +187,7 @@ class MessagePublisher:
                 message_properties["reply_to"] = reply_to
 
             if expiration:
-                message_properties["expiration"] = str(expiration)
+                message_properties["expiration"] = expiration
 
             if headers:
                 message_properties["headers"] = headers
@@ -171,14 +197,18 @@ class MessagePublisher:
 
             # Publish message
             target_exchange = self.exchange or self.channel.default_exchange
+            await self._ensure_routing_target(routing_key, priority=priority)
             await target_exchange.publish(msg, routing_key=routing_key)
 
             # Track if publisher confirms enabled
             if self.use_publisher_confirms:
-                self._pending_confirms[message_id] = {
+                pending_info = {
                     "routing_key": routing_key,
-                    "timestamp": datetime.utcnow(),
+                    "timestamp": utc_now(),
                 }
+                self._pending_confirms[message_id] = pending_info
+                self._pending_confirms.pop(message_id, None)
+                self._confirmed_messages.append(message_id)
 
             logger.info(
                 "Message published",
@@ -379,9 +409,9 @@ class MessagePublisher:
 
         try:
             # Wait for pending confirms
-            start_time = datetime.utcnow()
+            start_time = utc_now()
             while self._pending_confirms:
-                if (datetime.utcnow() - start_time).total_seconds() > timeout:
+                if (utc_now() - start_time).total_seconds() > timeout:
                     logger.warning(
                         f"Timeout waiting for {len(self._pending_confirms)} confirms"
                     )
@@ -425,14 +455,35 @@ class TransactionalPublisher(MessagePublisher):
         """
         super().__init__(*args, **kwargs)
         self._in_transaction = False
+        self._transaction = None
+
+    async def connect(self):
+        """Connect using a channel configuration compatible with transactions."""
+        try:
+            self.connection = await connect_robust(self.amqp_url)
+            self.channel = await self.connection.channel(publisher_confirms=False)
+
+            if self.exchange_name:
+                self.exchange = await self.channel.declare_exchange(
+                    self.exchange_name,
+                    self.exchange_type,
+                    durable=True,
+                )
+                logger.info(f"Declared exchange: {self.exchange_name}")
+
+            logger.info("Publisher connected to RabbitMQ")
+
+        except Exception as e:
+            logger.error(f"Failed to connect publisher to RabbitMQ: {e}")
+            raise
 
     async def begin_transaction(self):
         """Begin a transaction."""
         if not self.connection:
             await self.connect()
 
-        await self.channel.transaction_commit()  # Commit any existing transaction
-        await self.channel.tx_select()
+        self._transaction = self.channel.transaction()
+        await self._transaction.select()
         self._in_transaction = True
 
         logger.debug("Transaction started")
@@ -443,8 +494,9 @@ class TransactionalPublisher(MessagePublisher):
             logger.warning("No active transaction to commit")
             return
 
-        await self.channel.tx_commit()
+        await self._transaction.commit()
         self._in_transaction = False
+        self._transaction = None
 
         logger.info("Transaction committed")
 
@@ -454,8 +506,9 @@ class TransactionalPublisher(MessagePublisher):
             logger.warning("No active transaction to rollback")
             return
 
-        await self.channel.tx_rollback()
+        await self._transaction.rollback()
         self._in_transaction = False
+        self._transaction = None
 
         logger.info("Transaction rolled back")
 

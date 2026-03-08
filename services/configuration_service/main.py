@@ -17,25 +17,29 @@
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from shared.database import DatabaseManager, close_database, get_database_manager, init_database
-from shared.messaging import MessageConsumer
-from shared.models import ResponseMeta, SuccessResponse
-from shared.utils import Config, get_logger
+from sqlalchemy import desc, func, select
+
+from shared.database import DatabaseManager, get_database_manager, init_database, close_database
+from shared.database.models import AuditLog
+from shared.database.repositories.settings_repository import SettingsRepository
+from shared.utils import Config, get_logger, utc_now_iso
 
 logger = get_logger(__name__)
 config = Config()
 
 db_manager: DatabaseManager = None
 
-# In-memory configuration storage (use database in production)
-config_store: Dict[str, Dict[str, Any]] = {
-    "system": {"version": "1.0.0", "environment": "production", "maintenance_mode": False},
+DEFAULT_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "system": {
+        "version": "1.0.0",
+        "environment": "production",
+        "maintenance_mode": False,
+    },
     "alerts": {
         "auto_triage_enabled": True,
         "auto_response_threshold": "high",
@@ -45,6 +49,11 @@ config_store: Dict[str, Dict[str, Any]] = {
         "approval_required": True,
         "timeout_seconds": 600,
         "max_concurrent_executions": 10,
+        "retry_on_failure": True,
+        "max_retries": 3,
+        "notification_on_complete": True,
+        "notification_channels": ["email", "slack"],
+        "log_level": "info",
     },
     "notifications": {
         "channels": ["email", "slack"],
@@ -54,15 +63,39 @@ config_store: Dict[str, Dict[str, Any]] = {
         "low_alerts": ["in_app"],
     },
     "llm": {
-        "default_model": "deepseek-v3",
-        "fallback_model": "qwen3-max",
+        "llm_provider": "deepseek",
+        "zhipu_api_key": "",
+        "zhipu_model": "glm-4-flash",
+        "zhipu_base_url": "https://open.bigmodel.cn/api/paas/v4/",
+        "deepseek_api_key": "",
+        "deepseek_model": "deepseek-v3",
+        "deepseek_base_url": "https://api.deepseek.com/v1",
+        "qwen_api_key": "",
+        "qwen_model": "qwen3-max",
+        "qwen_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "openai_api_key": "",
+        "openai_model": "gpt-4-turbo",
+        "openai_base_url": "https://api.openai.com/v1",
         "temperature": 0.7,
         "max_tokens": 2000,
     },
 }
 
-# Configuration change history
-config_history: List[Dict[str, Any]] = []
+DEFAULT_PREFERENCES: Dict[str, Any] = {
+    "theme": "light",
+    "notifications": {
+        "email": True,
+        "browser": True,
+        "slack": False,
+    },
+    "dashboard": {
+        "default_view": "overview",
+        "refresh_interval": 30,
+    },
+    "alerts": {
+        "default_filters": {},
+    },
+}
 
 
 @asynccontextmanager
@@ -72,21 +105,18 @@ async def lifespan(app: FastAPI):
 
     logger.info("Starting Configuration service...")
 
-    # Initialize database
-    import os
     await init_database(
         database_url=config.database_url,
-        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
-        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        pool_size=config.db_pool_size,
+        max_overflow=config.db_max_overflow,
         echo=config.debug,
     )
     db_manager = get_database_manager()
+    await ensure_default_configs()
 
     logger.info("Configuration service started successfully")
-
     yield
-
-    await db_manager.close()
+    await close_database()
     logger.info("Configuration service stopped")
 
 
@@ -105,247 +135,361 @@ app.add_middleware(
 )
 
 
-def record_config_change(key: str, old_value: Any, new_value: Any, changed_by: str):
-    """Record configuration change in history."""
-    config_history.append(
-        {
-            "timestamp": datetime.utcnow().isoformat(),
-            "key": key,
-            "old_value": old_value,
-            "new_value": new_value,
-            "changed_by": changed_by,
-        }
-    )
+async def ensure_default_configs() -> None:
+    """Seed default configuration values in persistent storage."""
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        existing = await repo.get_all_configs()
+        for key, value in DEFAULT_CONFIGS.items():
+            if key not in existing:
+                await repo.create_config(
+                    config_key=key,
+                    config_value=value,
+                    description=f"Default configuration for {key}",
+                    category=key,
+                    updated_by="system",
+                )
+        await session.commit()
 
 
-# API Endpoints
+async def ensure_user_preferences(repo: SettingsRepository, user_id: str) -> Dict[str, Any]:
+    """Return existing preferences or seed defaults for the user."""
+    config_key = f"user_preferences:{user_id}"
+    cfg = await repo.get_config(config_key)
+
+    if not cfg:
+        await repo.create_config(
+            config_key=config_key,
+            config_value=DEFAULT_PREFERENCES,
+            description=f"User preferences for {user_id}",
+            category="preferences",
+            updated_by=user_id,
+        )
+        return DEFAULT_PREFERENCES.copy()
+
+    preferences = cfg.config_value if isinstance(cfg.config_value, dict) else {}
+    merged = DEFAULT_PREFERENCES.copy()
+    merged.update(preferences)
+    if "notifications" in preferences and isinstance(preferences["notifications"], dict):
+        merged["notifications"] = {**DEFAULT_PREFERENCES["notifications"], **preferences["notifications"]}
+    if "dashboard" in preferences and isinstance(preferences["dashboard"], dict):
+        merged["dashboard"] = {**DEFAULT_PREFERENCES["dashboard"], **preferences["dashboard"]}
+    if "alerts" in preferences and isinstance(preferences["alerts"], dict):
+        merged["alerts"] = {**DEFAULT_PREFERENCES["alerts"], **preferences["alerts"]}
+    return merged
+
+
+async def record_config_change(
+    session,
+    key: str,
+    old_value: Any,
+    new_value: Any,
+    changed_by: str,
+) -> None:
+    """Persist config change to audit log."""
+    try:
+        async with session.begin_nested():
+            session.add(
+                AuditLog(
+                    event_type="config.changed",
+                    event_category="system_config",
+                    action="update",
+                    actor_id=changed_by,
+                    actor_type="user",
+                    target_type="system_config",
+                    target_id=key,
+                    old_values=old_value if isinstance(old_value, dict) else {"value": old_value},
+                    new_values=new_value if isinstance(new_value, dict) else {"value": new_value},
+                    details={"config_key": key},
+                    status="success",
+                )
+            )
+            await session.flush()
+    except Exception as exc:
+        logger.warning(f"Skipping audit log for config change {key}: {exc}")
+
+
+def response_meta() -> Dict[str, str]:
+    """Generate standard response metadata."""
+    return {"timestamp": utc_now_iso(), "request_id": str(uuid.uuid4())}
 
 
 @app.get("/api/v1/config", response_model=Dict[str, Any])
-async def get_all_config():
-    """Get all configuration."""
+async def get_all_config(category: str | None = Query(default=None)):
+    """Get all configuration from persistent storage."""
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        configs = await repo.get_all_configs()
+    if category:
+        cfg = configs.get(category)
+        if not cfg:
+            raise HTTPException(status_code=404, detail=f"Configuration key not found: {category}")
+        return {
+            "success": True,
+            "data": {
+                category: {
+                    "value": cfg["value"],
+                    "category": cfg.get("category") or category,
+                    "description": f"Configuration for {category}",
+                    "editable": True,
+                }
+            },
+            "meta": response_meta(),
+        }
+    return {"success": True, "data": configs, "meta": response_meta()}
+
+
+@app.get("/api/v1/config/preferences", response_model=Dict[str, Any])
+async def get_preferences(user_id: str = Query(...)):
+    """Get persisted user preferences."""
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        preferences = await ensure_user_preferences(repo, user_id)
+        await session.commit()
+
     return {
         "success": True,
-        "data": config_store.copy(),
-        "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+        "data": preferences,
+        "meta": response_meta(),
+    }
+
+
+@app.put("/api/v1/config/preferences", response_model=Dict[str, Any])
+async def update_preferences(
+    payload: Dict[str, Any] = Body(...),
+    user_id: str = Query(...),
+):
+    """Persist user preferences."""
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        current = await ensure_user_preferences(repo, user_id)
+        config_key = f"user_preferences:{user_id}"
+
+        merged = current.copy()
+        for key, value in payload.items():
+            if isinstance(merged.get(key), dict) and isinstance(value, dict):
+                merged[key] = {**merged[key], **value}
+            else:
+                merged[key] = value
+
+        cfg = await repo.get_config(config_key)
+        if cfg:
+            await repo.update_config(config_key, merged, updated_by=user_id)
+        else:
+            await repo.create_config(
+                config_key=config_key,
+                config_value=merged,
+                description=f"User preferences for {user_id}",
+                category="preferences",
+                updated_by=user_id,
+            )
+        await session.commit()
+
+    return {
+        "success": True,
+        "data": merged,
+        "meta": response_meta(),
     }
 
 
 @app.get("/api/v1/config/{key}", response_model=Dict[str, Any])
 async def get_config(key: str):
     """Get specific configuration by key."""
-    if key not in config_store:
-        raise HTTPException(status_code=404, detail=f"Configuration key not found: {key}")
-
-    return {
-        "success": True,
-        "data": {"key": key, "value": config_store[key]},
-        "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
-    }
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        cfg = await repo.get_config(key)
+        if not cfg:
+            raise HTTPException(status_code=404, detail=f"Configuration key not found: {key}")
+        return {
+            "success": True,
+            "data": {"key": key, "value": cfg.config_value, "category": cfg.category},
+            "meta": response_meta(),
+        }
 
 
 @app.put("/api/v1/config/{key}", response_model=Dict[str, Any])
-async def update_config(key: str, value: Dict[str, Any], changed_by: str = "system"):
+async def update_config(
+    key: str,
+    value: Dict[str, Any] = Body(...),
+    changed_by: str = Query(default="system"),
+):
     """Update configuration."""
-    try:
-        if key not in config_store:
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        cfg = await repo.get_config(key)
+        if not cfg:
             raise HTTPException(status_code=404, detail=f"Configuration key not found: {key}")
 
-        old_value = config_store[key].copy()
+        old_value = cfg.config_value.copy() if isinstance(cfg.config_value, dict) else cfg.config_value
+        await repo.update_config(key, value, updated_by=changed_by)
+        await record_config_change(session, key, old_value, value, changed_by)
+        await session.commit()
 
-        # Update configuration
-        config_store[key] = value
-
-        # Record change
-        record_config_change(key, old_value, value, changed_by)
-
-        # Publish configuration change event
-        # TODO: Send to message queue for other services to update
-
-        logger.info(f"Configuration updated: {key} by {changed_by}")
-
-        return {
-            "success": True,
-            "data": {"key": key, "value": value, "old_value": old_value},
-            "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to update configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update configuration: {str(e)}")
+    logger.info(f"Configuration updated: {key} by {changed_by}")
+    return {
+        "success": True,
+        "data": {"key": key, "value": value, "old_value": old_value},
+        "meta": response_meta(),
+    }
 
 
 @app.post("/api/v1/config/{key}/reset", response_model=Dict[str, Any])
-async def reset_config(key: str, changed_by: str = "system"):
+async def reset_config(key: str, changed_by: str = Query(default="system")):
     """Reset configuration to default value."""
-    try:
-        # TODO: Define default configurations
-        defaults = {
-            "alerts": {
-                "auto_triage_enabled": True,
-                "auto_response_threshold": "high",
-                "human_review_required": ["critical", "high"],
-            },
-            "automation": {
-                "approval_required": True,
-                "timeout_seconds": 600,
-                "max_concurrent_executions": 10,
-            },
-        }
+    if key not in DEFAULT_CONFIGS:
+        raise HTTPException(status_code=400, detail=f"No default configuration defined for: {key}")
 
-        if key not in defaults:
-            raise HTTPException(
-                status_code=400, detail=f"No default configuration defined for: {key}"
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        cfg = await repo.get_config(key)
+        old_value = cfg.config_value.copy() if cfg and isinstance(cfg.config_value, dict) else {}
+        new_value = DEFAULT_CONFIGS[key].copy()
+
+        if cfg:
+            await repo.update_config(key, new_value, updated_by=changed_by)
+        else:
+            await repo.create_config(
+                config_key=key,
+                config_value=new_value,
+                description=f"Default configuration for {key}",
+                category=key,
+                updated_by=changed_by,
             )
 
-        old_value = config_store.get(key, {}).copy()
-        new_value = defaults[key].copy()
+        await record_config_change(session, key, old_value, new_value, changed_by)
+        await session.commit()
 
-        config_store[key] = new_value
-
-        record_config_change(key, old_value, new_value, changed_by)
-
-        logger.info(f"Configuration reset to default: {key}")
-
-        return {
-            "success": True,
-            "data": {"key": key, "value": new_value, "reset": True},
-            "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to reset configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to reset configuration: {str(e)}")
+    return {
+        "success": True,
+        "data": {"key": key, "value": new_value, "reset": True},
+        "meta": response_meta(),
+    }
 
 
 @app.get("/api/v1/config/{key}/history", response_model=Dict[str, Any])
 async def get_config_history(key: str, limit: int = 50):
-    """Get configuration change history."""
-    history = [h for h in config_history if h["key"] == key]
+    """Get configuration change history from audit logs."""
+    try:
+        async with db_manager.get_session() as session:
+            result = await session.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.event_category == "system_config",
+                    AuditLog.target_id == key,
+                )
+                .order_by(desc(AuditLog.timestamp))
+                .limit(limit)
+            )
+            rows = result.scalars().all()
+    except Exception:
+        rows = []
 
-    # Sort by timestamp descending
-    history = sorted(history, key=lambda x: x["timestamp"], reverse=True)
-
-    # Limit results
-    history = history[:limit]
-
+    history = [
+        {
+            "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+            "key": key,
+            "old_value": row.old_values,
+            "new_value": row.new_values,
+            "changed_by": row.actor_id,
+            "status": row.status,
+        }
+        for row in rows
+    ]
     return {
         "success": True,
         "data": {"key": key, "history": history, "total": len(history)},
-        "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
+        "meta": response_meta(),
     }
 
 
 @app.post("/api/v1/config/export", response_model=Dict[str, Any])
 async def export_config(format: str = "json"):
     """Export all configuration."""
-    try:
-        if format == "json":
-            content = json.dumps(config_store, indent=2)
-            content_type = "application/json"
-            filename = f"config_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        configs = await repo.get_all_configs()
 
-        elif format == "yaml":
-            content = yaml.dump(config_store, default_flow_style=False)
-            content_type = "application/x-yaml"
-            filename = f"config_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.yaml"
+    normalized = {key: value["value"] for key, value in configs.items()}
+    if format == "json":
+        content = json.dumps(normalized, indent=2)
+        filename = f"config_export_{uuid.uuid4().hex[:8]}.json"
+    elif format == "yaml":
+        content = yaml.dump(normalized, default_flow_style=False)
+        filename = f"config_export_{uuid.uuid4().hex[:8]}.yaml"
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported format: {format}. Use 'json' or 'yaml'")
 
-        else:
-            raise HTTPException(
-                status_code=400, detail=f"Unsupported format: {format}. Use 'json' or 'yaml'"
-            )
-
-        return {
-            "success": True,
-            "data": {
-                "content": content,
-                "format": format,
-                "filename": filename,
-                "content_type": content_type,
-            },
-            "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to export configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to export configuration: {str(e)}")
+    return {
+        "success": True,
+        "data": {
+            "format": format,
+            "filename": filename,
+            "content": content,
+        },
+        "meta": response_meta(),
+    }
 
 
 @app.post("/api/v1/config/import", response_model=Dict[str, Any])
 async def import_config(
-    content: str, format: str = "json", merge: bool = True, changed_by: str = "import"
+    content: str,
+    format: str = "json",
+    changed_by: str = Query(default="system"),
 ):
-    """Import configuration."""
+    """Import configuration into persistent storage."""
     try:
-        if format == "json":
-            imported_config = json.loads(content)
-        elif format == "yaml":
-            imported_config = yaml.safe_load(content)
-        else:
-            raise HTTPException(
-                status_code=400, detail=f"Unsupported format: {format}. Use 'json' or 'yaml'"
-            )
+        imported = json.loads(content) if format == "json" else yaml.safe_load(content)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid configuration format: {exc}") from exc
 
-        if not isinstance(imported_config, dict):
-            raise HTTPException(status_code=400, detail="Invalid configuration format")
+    if not isinstance(imported, dict):
+        raise HTTPException(status_code=400, detail="Invalid configuration payload")
 
-        # Validate imported configuration
-        for key, value in imported_config.items():
-            if key in config_store and not isinstance(value, dict):
+    changed_keys = []
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        for key, value in imported.items():
+            if not isinstance(value, dict):
                 raise HTTPException(status_code=400, detail=f"Invalid configuration for key: {key}")
+            cfg = await repo.get_config(key)
+            if cfg:
+                old_value = cfg.config_value.copy() if isinstance(cfg.config_value, dict) else cfg.config_value
+                merged = {**cfg.config_value, **value}
+                await repo.update_config(key, merged, updated_by=changed_by)
+                await record_config_change(session, key, old_value, merged, changed_by)
+            else:
+                await repo.create_config(
+                    config_key=key,
+                    config_value=value,
+                    description=f"Imported configuration for {key}",
+                    category=key,
+                    updated_by=changed_by,
+                )
+                await record_config_change(session, key, {}, value, changed_by)
+            changed_keys.append(key)
+        await session.commit()
 
-        # Apply configuration
-        imported_keys = []
-        for key, value in imported_config.items():
-            if key in config_store:
-                old_value = config_store[key].copy()
-
-                if merge and isinstance(value, dict) and isinstance(old_value, dict):
-                    # Merge dictionaries
-                    merged = {**old_value, **value}
-                    config_store[key] = merged
-                    record_config_change(key, old_value, merged, changed_by)
-                else:
-                    # Replace entirely
-                    config_store[key] = value
-                    record_config_change(key, old_value, value, changed_by)
-
-                imported_keys.append(key)
-
-        logger.info(f"Configuration imported: {len(imported_keys)} keys updated by {changed_by}")
-
-        return {
-            "success": True,
-            "data": {"imported_keys": imported_keys, "total": len(imported_keys)},
-            "meta": {"timestamp": datetime.utcnow().isoformat(), "request_id": str(uuid.uuid4())},
-        }
-
-    except HTTPException:
-        raise
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-    except yaml.YAMLError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid YAML: {str(e)}")
-    except Exception as e:
-        logger.error(f"Failed to import configuration: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to import configuration: {str(e)}")
+    return {
+        "success": True,
+        "data": {"imported_keys": changed_keys, "count": len(changed_keys)},
+        "meta": response_meta(),
+    }
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    async with db_manager.get_session() as session:
+        repo = SettingsRepository(session)
+        configs = await repo.get_all_configs()
+        audit_count = 0
+
     return {
         "status": "healthy",
         "service": "configuration-service",
-        "timestamp": datetime.utcnow().isoformat(),
-        "config_keys": len(config_store),
-        "history_entries": len(config_history),
+        "timestamp": utc_now_iso(),
+        "config_keys": len(configs),
+        "history_entries": audit_count or 0,
     }
 
 

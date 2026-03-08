@@ -534,9 +534,15 @@ async def persist_context_to_db(alert_id: str, enrichment: Dict[str, Any]):
             # Save network context for source IP
             if "source_network" in enrichment:
                 await session.execute(
+                    text(
+                        "DELETE FROM alert_context WHERE alert_id = :alert_id AND context_type = :context_type"
+                    ),
+                    {"alert_id": alert_id, "context_type": "network"},
+                )
+                await session.execute(
                     text("""
                         INSERT INTO alert_context (alert_id, context_type, context_data, source, confidence_score)
-                        VALUES (:alert_id, :context_type, :context_data, :source, :confidence_score)
+                        VALUES (:alert_id, :context_type, :context_data::jsonb, :source, :confidence_score)
                     """),
                     {
                         "alert_id": alert_id,
@@ -550,9 +556,15 @@ async def persist_context_to_db(alert_id: str, enrichment: Dict[str, Any]):
             # Save asset context
             if "asset" in enrichment:
                 await session.execute(
+                    text(
+                        "DELETE FROM alert_context WHERE alert_id = :alert_id AND context_type = :context_type"
+                    ),
+                    {"alert_id": alert_id, "context_type": "asset"},
+                )
+                await session.execute(
                     text("""
                         INSERT INTO alert_context (alert_id, context_type, context_data, source, confidence_score)
-                        VALUES (:alert_id, :context_type, :context_data, :source, :confidence_score)
+                        VALUES (:alert_id, :context_type, :context_data::jsonb, :source, :confidence_score)
                     """),
                     {
                         "alert_id": alert_id,
@@ -566,9 +578,15 @@ async def persist_context_to_db(alert_id: str, enrichment: Dict[str, Any]):
             # Save user context
             if "user" in enrichment:
                 await session.execute(
+                    text(
+                        "DELETE FROM alert_context WHERE alert_id = :alert_id AND context_type = :context_type"
+                    ),
+                    {"alert_id": alert_id, "context_type": "user"},
+                )
+                await session.execute(
                     text("""
                         INSERT INTO alert_context (alert_id, context_type, context_data, source, confidence_score)
-                        VALUES (:alert_id, :context_type, :context_data, :source, :confidence_score)
+                        VALUES (:alert_id, :context_type, :context_data::jsonb, :source, :confidence_score)
                     """),
                     {
                         "alert_id": alert_id,
@@ -579,6 +597,16 @@ async def persist_context_to_db(alert_id: str, enrichment: Dict[str, Any]):
                     }
                 )
 
+            await session.execute(
+                text(
+                    """
+                    UPDATE alerts
+                    SET status = :status, updated_at = NOW()
+                    WHERE alert_id = :alert_id
+                    """
+                ),
+                {"alert_id": alert_id, "status": "analyzing"},
+            )
             await session.commit()
             logger.debug(f"Context persisted for alert {alert_id}")
 

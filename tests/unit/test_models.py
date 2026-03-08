@@ -18,7 +18,7 @@ Unit tests for shared models.
 Tests all Pydantic models in the shared module.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -54,7 +54,7 @@ class TestSecurityAlert:
         with pytest.raises(ValidationError):
             SecurityAlert(
                 alert_id="ALT-INVALID",
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 alert_type=AlertType.MALWARE,
                 severity=Severity.HIGH,
                 description="Test",
@@ -66,7 +66,7 @@ class TestSecurityAlert:
         with pytest.raises(ValidationError):
             SecurityAlert(
                 alert_id="ALT-INVALID",
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 alert_type=AlertType.MALWARE,
                 severity=Severity.HIGH,
                 description="Test",
@@ -75,7 +75,7 @@ class TestSecurityAlert:
 
     def test_alert_validation_future_timestamp(self):
         """Test alert validation rejects future timestamps (> 5 minutes)."""
-        future_time = datetime.utcnow() + timedelta(minutes=10)
+        future_time = datetime.now(UTC) + timedelta(minutes=10)
 
         with pytest.raises(ValidationError):
             SecurityAlert(
@@ -117,7 +117,7 @@ class TestTriageResult:
                 reasoning="Test",
                 recommended_actions=[],
                 triaged_by="ai-agent",
-                triaged_at=datetime.utcnow(),
+                triaged_at=datetime.now(UTC),
             )
 
 

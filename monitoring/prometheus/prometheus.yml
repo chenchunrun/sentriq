@@ -28,117 +28,12 @@ scrape_configs:
         labels:
           service: 'prometheus'
 
-  # API Gateway
-  - job_name: 'api-gateway'
+  # Monitoring Metrics Service (aggregated metrics)
+  - job_name: 'monitoring-metrics'
     static_configs:
-      - targets: ['api-gateway:8000']
+      - targets: ['monitoring-metrics:8000']
         labels:
-          service: 'api-gateway'
-          component: 'gateway'
+          service: 'monitoring-metrics'
+          component: 'monitoring'
     metrics_path: '/metrics'
     scrape_interval: 10s
-
-  # Alert Ingestor
-  - job_name: 'alert-ingestor'
-    static_configs:
-      - targets: ['alert-ingestor:9001']
-        labels:
-          service: 'alert-ingestor'
-          component: 'ingestion'
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  # Alert Normalizer
-  - job_name: 'alert-normalizer'
-    static_configs:
-      - targets: ['alert-normalizer:9002']
-        labels:
-          service: 'alert-normalizer'
-          component: 'processing'
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  # Context Collector
-  - job_name: 'context-collector'
-    static_configs:
-      - targets: ['context-collector:9003']
-        labels:
-          service: 'context-collector'
-          component: 'enrichment'
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  # Threat Intel Aggregator
-  - job_name: 'threat-intel-aggregator'
-    static_configs:
-      - targets: ['threat-intel-aggregator:9004']
-        labels:
-          service: 'threat-intel-aggregator'
-          component: 'threat-intel'
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  # LLM Router
-  - job_name: 'llm-router'
-    static_configs:
-      - targets: ['llm-router:9005']
-        labels:
-          service: 'llm-router'
-          component: 'ai'
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  # AI Triage Agent
-  - job_name: 'ai-triage-agent'
-    static_configs:
-      - targets: ['ai-triage-agent:9006']
-        labels:
-          service: 'ai-triage-agent'
-          component: 'ai'
-    metrics_path: '/metrics'
-    scrape_interval: 10s
-
-  # PostgreSQL Exporter
-  - job_name: 'postgres'
-    static_configs:
-      - targets: ['postgres-exporter:9187']
-        labels:
-          service: 'postgres'
-          component: 'database'
-    scrape_interval: 30s
-
-  # Redis Exporter
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['redis-exporter:9121']
-        labels:
-          service: 'redis'
-          component: 'cache'
-    scrape_interval: 30s
-
-  # RabbitMQ Exporter
-  - job_name: 'rabbitmq'
-    static_configs:
-      - targets: ['rabbitmq:15692']
-        labels:
-          service: 'rabbitmq'
-          component: 'message-queue'
-    scrape_interval: 30s
-
-  # Node Exporter (system metrics)
-  - job_name: 'node'
-    static_configs:
-      - targets: ['node-exporter:9100']
-        labels:
-          service: 'system'
-          component: 'infrastructure'
-    scrape_interval: 15s
-
-  # cAdvisor (container metrics)
-  - job_name: 'cadvisor'
-    static_configs:
-      - targets: ['cadvisor:8080']
-        labels:
-          service: 'containers'
-          component: 'infrastructure'
-    scrape_interval: 15s

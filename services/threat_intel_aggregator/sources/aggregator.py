@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now_iso
 
 logger = get_logger(__name__)
 
@@ -82,7 +83,7 @@ class ThreatIntelAggregator:
         for source_name, result in zip(self.sources.keys(), results):
             if isinstance(result, Exception):
                 logger.error(f"Error from {source_name}: {result}")
-            elif result:
+            elif result is not None:
                 source_results[source_name] = result
 
         # Calculate aggregate score
@@ -92,7 +93,10 @@ class ThreatIntelAggregator:
         aggregate_data["ioc"] = ioc
         aggregate_data["ioc_type"] = ioc_type
         aggregate_data["queried_sources"] = list(source_results.keys())
-        aggregate_data["queried_at"] = datetime.utcnow().isoformat()
+        aggregate_data["total_sources"] = len(tasks)
+        if aggregate_data["total_sources"] > 0:
+            aggregate_data["confidence"] = aggregate_data.get("detected_by_count", 0) / aggregate_data["total_sources"]
+        aggregate_data["queried_at"] = utc_now_iso()
 
         logger.info(
             f"Threat intel aggregated for {ioc}",
@@ -131,8 +135,10 @@ class ThreatIntelAggregator:
             total_count += 1
 
             if detected:
-                detection_rate = result.get("detection_rate", 0)
-                weighted_sum += detection_rate * weight
+                detection_rate = float(result.get("detection_rate", 0) or 0)
+                if detection_rate <= 1:
+                    detection_rate *= 100
+                weighted_sum += max(0.0, min(100.0, detection_rate)) * weight
 
             weight_sum += weight
 
@@ -149,7 +155,7 @@ class ThreatIntelAggregator:
 
         # Calculate aggregate score (0-100)
         if weight_sum > 0:
-            aggregate_score = (weighted_sum / weight_sum) * 100
+            aggregate_score = weighted_sum / weight_sum
         else:
             aggregate_score = 0
 

@@ -25,3 +25,5 @@ httpx==0.26.0
 
 # Utilities
 python-dotenv==1.0.0
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.1.2

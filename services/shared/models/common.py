@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Any, Generic, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
+from shared.utils.time import utc_now
 
 T = TypeVar("T")
 
@@ -109,7 +110,7 @@ class ResponseMeta(BaseModel):
     """
 
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow, description="Response timestamp in ISO 8601 format"
+        default_factory=utc_now, description="Response timestamp in ISO 8601 format"
     )
     request_id: str = Field(..., description="Unique request identifier")
     version: Optional[str] = Field(default=None, description="API version")
@@ -163,7 +164,7 @@ class HealthStatus(BaseModel):
     status: str = Field(
         ..., description="Overall health status", pattern="^(healthy|degraded|unhealthy)$"
     )
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=utc_now)
     checks: dict[str, dict[str, Any]] = Field(
         default_factory=dict, description="Individual service checks"
     )

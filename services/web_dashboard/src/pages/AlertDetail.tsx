@@ -34,21 +34,27 @@ const severityColors = {
 const statusColors = {
   pending: 'bg-gray-100 text-gray-800',
   analyzing: 'bg-blue-100 text-blue-800',
+  analyzed: 'bg-indigo-100 text-indigo-800',
+  investigating: 'bg-yellow-100 text-yellow-800',
   triaged: 'bg-purple-100 text-purple-800',
   in_progress: 'bg-yellow-100 text-yellow-800',
   resolved: 'bg-green-100 text-green-800',
   closed: 'bg-gray-100 text-gray-800',
   false_positive: 'bg-red-100 text-red-800',
+  suppressed: 'bg-gray-100 text-gray-600',
 }
 
 const statusLabels = {
   pending: 'Pending',
   analyzing: 'Analyzing',
+  analyzed: 'Analyzed',
+  investigating: 'Investigating',
   triaged: 'Triaged',
   in_progress: 'In Progress',
   resolved: 'Resolved',
   closed: 'Closed',
   false_positive: 'False Positive',
+  suppressed: 'Suppressed',
 }
 
 export const AlertDetail: React.FC = () => {
@@ -67,6 +73,7 @@ export const AlertDetail: React.FC = () => {
     queryKey: ['similar-alerts', id],
     queryFn: () => api.similarity.findSimilar(id!, 3),
     enabled: !!id,
+    retry: false,
     staleTime: 5 * 60 * 1000, // 5 minutes
   })
 
@@ -163,12 +170,12 @@ export const AlertDetail: React.FC = () => {
             Mark Resolved
           </button>
           <button
-            onClick={() => handleStatusChange('false_positive')}
+            onClick={() => handleStatusChange('suppressed')}
             className="btn btn-outline flex items-center gap-2"
             disabled={updateStatusMutation.isPending}
           >
             <XCircle className="w-4 h-4" />
-            False Positive
+            Suppress Alert
           </button>
         </div>
       </div>
@@ -341,7 +348,7 @@ export const AlertDetail: React.FC = () => {
                               Similarity: {(similarAlert.similarity_score * 100).toFixed(1)}%
                             </span>
                           </div>
-                          {similarAlert.alert_data?.description && (
+                          {typeof similarAlert.alert_data?.description === 'string' && (
                             <p className="text-sm text-gray-600 line-clamp-2">
                               {similarAlert.alert_data.description}
                             </p>
@@ -398,7 +405,7 @@ export const AlertDetail: React.FC = () => {
             </div>
             <div className="card-body space-y-3">
               <button
-                onClick={() => handleStatusChange('in_progress')}
+                onClick={() => handleStatusChange('investigating')}
                 className="w-full btn btn-outline flex items-center justify-center gap-2"
                 disabled={updateStatusMutation.isPending}
               >
@@ -414,12 +421,12 @@ export const AlertDetail: React.FC = () => {
                 Mark Resolved
               </button>
               <button
-                onClick={() => handleStatusChange('false_positive')}
+                onClick={() => handleStatusChange('suppressed')}
                 className="w-full btn btn-outline flex items-center justify-center gap-2 text-danger-600 border-danger-300 hover:bg-danger-50"
                 disabled={updateStatusMutation.isPending}
               >
                 <XCircle className="w-4 h-4" />
-                Mark False Positive
+                Suppress Alert
               </button>
             </div>
           </div>
@@ -437,9 +444,12 @@ export const AlertDetail: React.FC = () => {
                 <p className="text-sm text-gray-600 mt-2">
                   {alert.status === 'pending' && 'Waiting for investigation'}
                   {alert.status === 'analyzing' && 'AI analysis in progress'}
+                  {alert.status === 'analyzed' && 'AI analysis completed'}
+                  {alert.status === 'investigating' && 'Under investigation'}
                   {alert.status === 'in_progress' && 'Under investigation'}
                   {alert.status === 'resolved' && 'Successfully resolved'}
                   {alert.status === 'false_positive' && 'Marked as false positive'}
+                  {alert.status === 'suppressed' && 'Suppressed from active workflow'}
                 </p>
               </div>
             </div>

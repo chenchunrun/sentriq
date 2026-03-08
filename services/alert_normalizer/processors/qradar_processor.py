@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from shared.models.alert import AlertType, SecurityAlert, Severity
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now, utc_now_iso
 
 logger = get_logger(__name__)
 
@@ -148,7 +149,7 @@ class QRadarProcessor:
                 raw_data=raw_alert,
                 normalized_data={
                     "source_type": "qradar",
-                    "normalized_at": datetime.utcnow().isoformat(),
+                    "normalized_at": utc_now_iso(),
                     "offense_id": raw_alert.get("offense_id", ""),
                     "offense_type": raw_alert.get("offense_type", ""),
                     "magnitude": raw_alert.get("magnitude", 0),
@@ -237,7 +238,7 @@ class QRadarProcessor:
                             continue
 
         # Default to current time
-        return datetime.utcnow()
+        return utc_now().replace(tzinfo=None)
 
     def _extract_alert_type(self, raw_alert: Dict[str, Any]) -> AlertType:
         """Extract and map alert type from QRadar alert."""

@@ -14,6 +14,7 @@
 
 """Similarity Search Service - Uses ChromaDB for vector similarity search."""
 
+import asyncio
 import json
 import os
 import time
@@ -24,21 +25,24 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from shared.database import get_database_manager, init_database, close_database
 from shared.messaging import MessageConsumer
 from shared.models import (
+    AlertType,
     EmbeddingModel,
     EmbeddingRequest,
     EmbeddingResponse,
     IndexStats,
     ResponseMeta,
     SecurityAlert,
+    Severity,
     SimilarAlert,
     SuccessResponse,
     VectorSearchRequest,
     VectorSearchResponse,
 )
-from shared.utils import Config, get_logger
+from shared.utils import Config, get_logger, utc_now, utc_now_iso
 
 logger = get_logger(__name__)
 config = Config()
@@ -50,11 +54,20 @@ consumer = None
 chroma_client = None
 collection = None
 embedding_model = None
+SIMILARITY_MOCK_MODE = os.getenv("SIMILARITY_MOCK_MODE", "false").lower() == "true"
+MOCK_EMBEDDING_DIM = int(os.getenv("MOCK_EMBEDDING_DIM", "128"))
+
+VECTORIZE_ON_STARTUP = os.getenv("VECTORIZE_ON_STARTUP", "true").lower() == "true"
+VECTORIZE_LIMIT = int(os.getenv("VECTORIZE_LIMIT", "0"))
+VECTORIZE_BATCH = int(os.getenv("VECTORIZE_BATCH", "200"))
 
 
 def initialize_embedding_model(model_name: str):
     """Initialize sentence transformer model."""
     try:
+        if SIMILARITY_MOCK_MODE:
+            logger.warning("SIMILARITY_MOCK_MODE enabled; using mock embeddings")
+            return "mock"
         from sentence_transformers import SentenceTransformer
 
         model = SentenceTransformer(model_name)
@@ -71,6 +84,17 @@ def initialize_embedding_model(model_name: str):
         raise HTTPException(status_code=500, detail=f"Failed to load embedding model: {str(e)}")
 
 
+def generate_mock_embedding(text: str) -> List[float]:
+    """Generate deterministic mock embedding for offline environments."""
+    import hashlib
+
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    values = []
+    for i in range(MOCK_EMBEDDING_DIM):
+        values.append(digest[i % len(digest)] / 255.0)
+    return values
+
+
 def initialize_chromadb():
     """Initialize ChromaDB client and collection."""
     try:
@@ -78,8 +102,9 @@ def initialize_chromadb():
         from chromadb.config import Settings
 
         # Use persistent storage
+        persist_path = os.getenv("CHROMA_PERSIST_PATH", "./data/chroma")
         client = chromadb.PersistentClient(
-            path="./data/chroma", settings=Settings(anonymized_telemetry=False)
+            path=persist_path, settings=Settings(anonymized_telemetry=False)
         )
 
         # Get or create collection
@@ -133,13 +158,116 @@ def alert_to_text(alert: SecurityAlert) -> str:
     return ". ".join(parts)
 
 
+def alert_from_row(row: Any) -> SecurityAlert:
+    """Build SecurityAlert from DB row."""
+    alert_type = AlertType.from_string(row.alert_type) if row.alert_type else AlertType.OTHER
+    try:
+        severity = Severity(row.severity) if row.severity else Severity.MEDIUM
+    except Exception:
+        severity = Severity.MEDIUM
+
+    return SecurityAlert(
+        alert_id=row.alert_id,
+        timestamp=row.received_at,
+        alert_type=alert_type,
+        severity=severity,
+        description=row.description or "No description",
+        source_ip=row.source_ip,
+        target_ip=row.destination_ip,
+        file_hash=row.file_hash,
+        url=row.url,
+        asset_id=row.asset_id,
+        user_id=row.user_name,
+        raw_data=row.raw_data,
+    )
+
+
+async def reindex_from_database(limit: int = 0, batch_size: int = 200):
+    """Load alerts from DB and upsert into vector index."""
+    if collection is None:
+        logger.warning("ChromaDB collection not initialized; skipping reindex")
+        return
+
+    query = """
+        SELECT alert_id, received_at, alert_type, severity, description,
+               source_ip, destination_ip, file_hash, url, asset_id, user_name, raw_data
+        FROM alerts
+        ORDER BY received_at DESC
+    """
+    if limit and limit > 0:
+        query += " LIMIT :limit"
+
+    indexed = 0
+    failed = 0
+
+    async with db_manager.get_session() as session:
+        result = await session.execute(text(query), {"limit": limit} if limit and limit > 0 else {})
+        rows = result.fetchall()
+
+    total = len(rows)
+    if total == 0:
+        logger.info("No alerts found for vectorization")
+        return
+
+    logger.info(f"Vectorizing {total} alerts from database")
+
+    for idx, row in enumerate(rows, 1):
+        try:
+            alert = alert_from_row(row)
+            await index_alert(alert)
+            indexed += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"Failed to index alert {getattr(row, 'alert_id', 'unknown')}: {e}")
+
+        if idx % batch_size == 0 or idx == total:
+            logger.info(f"Vectorization progress: {idx}/{total} (ok={indexed}, failed={failed})")
+
+
 def generate_embedding(text: str) -> List[float]:
     """Generate embedding for text."""
     if embedding_model is None:
         raise HTTPException(status_code=500, detail="Embedding model not initialized")
 
+    if SIMILARITY_MOCK_MODE or embedding_model == "mock":
+        return generate_mock_embedding(text)
+
     embedding = embedding_model.encode(text, convert_to_numpy=True)
     return embedding.tolist()
+
+
+async def consume_alert_results():
+    """Consume triage results and index alerts into ChromaDB."""
+
+    async def process_message(message: dict):
+        try:
+            if "data" in message and isinstance(message["data"], dict):
+                actual_message = message["data"]
+                meta = message.get("_meta", {})
+                message_id = meta.get("message_id", actual_message.get("message_id", "unknown"))
+            else:
+                actual_message = message
+                message_id = actual_message.get("message_id", "unknown")
+
+            payload = actual_message.get("payload", actual_message)
+            alert_data = payload.get("alert")
+            triage_result = payload.get("triage_result")
+
+            if not alert_data:
+                logger.warning(f"No alert data in message {message_id}")
+                return
+
+            alert = SecurityAlert(**alert_data)
+
+            # Index alert with triage metadata
+            await index_alert(alert, triage_result)
+            logger.info(f"Indexed alert from queue (message_id: {message_id}, alert_id: {alert.alert_id})")
+
+        except Exception as e:
+            logger.error(f"Failed to process alert.result message: {e}", exc_info=True)
+            raise
+
+    await consumer.consume(process_message)
 
 
 @asynccontextmanager
@@ -161,7 +289,9 @@ async def lifespan(app: FastAPI):
         logger.info("✓ Database connected")
 
         # Initialize embedding model
-        embedding_model = initialize_embedding_model("all-MiniLM-L6-v2")
+        embedding_model = initialize_embedding_model(
+            os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+        )
         logger.info("✓ Embedding model initialized")
 
         # Initialize ChromaDB
@@ -173,8 +303,14 @@ async def lifespan(app: FastAPI):
             consumer = MessageConsumer(config.rabbitmq_url, "alert.result")
             await consumer.connect()
             logger.info("✓ Message consumer connected")
+            asyncio.create_task(consume_alert_results())
+            logger.info("✓ Alert result consumer task started")
         except Exception as e:
             logger.warning(f"Could not connect to message queue: {e}")
+
+        if VECTORIZE_ON_STARTUP:
+            asyncio.create_task(reindex_from_database(VECTORIZE_LIMIT, VECTORIZE_BATCH))
+            logger.info("✓ Vectorization task started")
 
         logger.info("✓ Similarity Search service started successfully")
 
@@ -265,16 +401,30 @@ async def search_similar_alerts(request: VectorSearchRequest):
                 if similarity_score < request.min_similarity:
                     continue
 
+                alert_data = metadata.get("alert_data", {})
+                if isinstance(alert_data, str):
+                    try:
+                        alert_data = json.loads(alert_data)
+                    except Exception:
+                        alert_data = {}
+
+                triage_result = metadata.get("triage_result")
+                if isinstance(triage_result, str):
+                    try:
+                        triage_result = json.loads(triage_result)
+                    except Exception:
+                        triage_result = None
+
                 similar_alerts.append(
                     SimilarAlert(
                         alert_id=alert_id,
                         similarity_score=similarity_score,
-                        alert_data=metadata.get("alert_data", {}),
+                        alert_data=alert_data,
                         matched_fields=metadata.get("matched_fields", []),
                         risk_level=metadata.get("risk_level"),
-                        triage_result=metadata.get("triage_result"),
+                        triage_result=triage_result,
                         created_at=datetime.fromisoformat(
-                            metadata.get("created_at", datetime.utcnow().isoformat())
+                            metadata.get("created_at", utc_now_iso())
                         ),
                     )
                 )
@@ -290,7 +440,7 @@ async def search_similar_alerts(request: VectorSearchRequest):
         return SuccessResponse(
             data=response,
             meta=ResponseMeta(
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 request_id=str(uuid.uuid4()),
             ),
         )
@@ -331,7 +481,7 @@ async def generate_embeddings(request: EmbeddingRequest):
         return SuccessResponse(
             data=response,
             meta=ResponseMeta(
-                timestamp=datetime.utcnow(),
+                timestamp=utc_now(),
                 request_id=str(uuid.uuid4()),
             ),
         )
@@ -363,15 +513,20 @@ async def index_alert(alert: SecurityAlert, triage_result: Optional[Dict[str, An
             "severity": alert.severity.value,
             "description": alert.description,
             "created_at": alert.timestamp.isoformat(),
-            "alert_data": alert.model_dump(),
+            # Chroma metadata must be scalar/array types; store JSON string
+            "alert_data": json.dumps(alert.model_dump(mode="json")),
         }
 
         if triage_result:
             metadata["risk_level"] = triage_result.get("risk_level")
-            metadata["triage_result"] = triage_result
+            metadata["triage_result"] = json.dumps(triage_result)
 
-        # Add to ChromaDB
-        collection.add(embeddings=[embedding], ids=[alert.alert_id], metadatas=[metadata])
+        # Add to ChromaDB. Keep add-first behavior for compatibility with existing tests/mocks.
+        try:
+            collection.add(embeddings=[embedding], ids=[alert.alert_id], metadatas=[metadata])
+        except Exception:
+            # Fallback to upsert when ID already exists.
+            collection.upsert(embeddings=[embedding], ids=[alert.alert_id], metadatas=[metadata])
 
         logger.info(f"Indexed alert {alert.alert_id}")
 
@@ -379,7 +534,7 @@ async def index_alert(alert: SecurityAlert, triage_result: Optional[Dict[str, An
             "success": True,
             "message": f"Alert {alert.alert_id} indexed successfully",
             "meta": {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_iso(),
                 "request_id": str(uuid.uuid4()),
             },
         }
@@ -390,7 +545,7 @@ async def index_alert(alert: SecurityAlert, triage_result: Optional[Dict[str, An
             "success": False,
             "error": str(e),
             "meta": {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_iso(),
                 "request_id": str(uuid.uuid4()),
             },
         }
@@ -460,7 +615,7 @@ async def health_check():
         "status": "healthy",
         "service": "similarity-search",
         "timestamp": datetime.utcnow().isoformat(),
-        "embedding_model": "all-MiniLM-L6-v2",
+        "embedding_model": "mock" if SIMILARITY_MOCK_MODE else "all-MiniLM-L6-v2",
         "chromadb": "connected" if chroma_client else "disconnected",
     }
 

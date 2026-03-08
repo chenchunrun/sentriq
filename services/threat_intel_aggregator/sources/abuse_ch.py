@@ -19,10 +19,11 @@ Queries Abuse.ch SSLBL and URLhaus for threat intelligence.
 """
 
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, Dict, Optional
 
 from shared.utils.logger import get_logger
+from shared.utils.time import utc_now
 
 logger = get_logger(__name__)
 
@@ -99,12 +100,12 @@ class AbuseCHSource:
         """Get from cache."""
         if key in self.cache:
             data, expiry = self.cache[key]
-            if datetime.utcnow() < expiry:
+            if utc_now() < expiry:
                 return data
             del self.cache[key]
         return None
 
     def _put_in_cache(self, key: str, data: Any):
         """Put in cache."""
-        expiry = datetime.utcnow() + self.cache_ttl
+        expiry = utc_now() + self.cache_ttl
         self.cache[key] = (data, expiry)
