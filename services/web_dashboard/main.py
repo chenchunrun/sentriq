@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from shared.database import DatabaseManager, close_database, get_database_manager, init_database
 from shared.utils import Config, get_logger
+from shared.utils.time import utc_now
 from shared.utils.crypto import encrypt_value, decrypt_value, safe_decrypt
 from alert_create import build_alert_create_payload
 
@@ -315,7 +316,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "web-dashboard",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now().isoformat(),
         "services": SERVICE_URLS,
     }
 
@@ -2887,7 +2888,7 @@ async def list_workflow_executions(
                     }
                 )
 
-            return {"success": True, "data": data}
+            return {"success": True, "data": {"executions": data, "total": len(data)}}
     except Exception as e:
         logger.error(f"Error fetching workflow executions: {e}", exc_info=True)
         return JSONResponse(
@@ -2896,10 +2897,165 @@ async def list_workflow_executions(
         )
 
 
+@app.get("/api/v1/playbooks")
+async def list_playbooks_proxy():
+    """Proxy playbook list to automation orchestrator."""
+    data = await call_service_json("automation", "/playbooks")
+    if data is None:
+        return JSONResponse(
+            content={"success": False, "error": "Automation service unavailable"},
+            status_code=502,
+        )
+    return data
+
+
+@app.get("/api/v1/analytics/dashboard")
+async def analytics_dashboard_proxy():
+    """Return normalized dashboard metrics for the SPA."""
+    metrics = await call_service_json("analytics", "/metrics/alerts")
+    if metrics is None:
+        return JSONResponse(
+            content={"success": False, "error": "Analytics service unavailable"},
+            status_code=502,
+        )
+
+    alert_metrics = metrics.get("data", {})
+    return {
+        "total_alerts": alert_metrics.get("total_alerts", 0),
+        "avg_response_time": alert_metrics.get("avg_resolution_time", 0),
+        "mtta": alert_metrics.get("mtta", 0),
+        "mttr": alert_metrics.get("mttr", 0),
+        "triaged": alert_metrics.get("triaged", 0),
+        "auto_closed": alert_metrics.get("auto_closed", 0),
+        "human_reviewed": alert_metrics.get("human_reviewed", 0),
+    }
+
+
+@app.get("/api/v1/analytics/metrics/severity-distribution")
+async def analytics_severity_distribution_proxy():
+    """Return severity distribution for dashboard charts."""
+    metrics = await call_service_json("analytics", "/metrics/alerts")
+    if metrics is None:
+        return JSONResponse(
+            content={"success": False, "error": "Analytics service unavailable"},
+            status_code=502,
+        )
+    return metrics.get("data", {}).get("by_severity", {})
+
+
+@app.get("/api/v1/analytics/metrics/status-distribution")
+async def analytics_status_distribution_proxy():
+    """Return status distribution for dashboard charts."""
+    metrics = await call_service_json("analytics", "/metrics/alerts")
+    if metrics is None:
+        return JSONResponse(
+            content={"success": False, "error": "Analytics service unavailable"},
+            status_code=502,
+        )
+    return metrics.get("data", {}).get("by_status", {})
+
+
+@app.get("/api/v1/analytics/metrics/top-alert-types")
+async def analytics_top_alert_types_proxy(limit: int = 5):
+    """Return top alert types in the format expected by the SPA."""
+    metrics = await call_service_json("analytics", "/metrics/alerts")
+    if metrics is None:
+        return JSONResponse(
+            content={"success": False, "error": "Analytics service unavailable"},
+            status_code=502,
+        )
+
+    by_type = metrics.get("data", {}).get("by_type", {}) or {}
+    rows = [
+        {"alert_type": alert_type, "count": count}
+        for alert_type, count in by_type.items()
+    ]
+    rows.sort(key=lambda item: item["count"], reverse=True)
+    return rows[: max(limit, 0)]
+
+
+@app.get("/api/v1/playbooks/{playbook_id}")
+async def get_playbook_proxy(playbook_id: str):
+    """Proxy playbook detail to automation orchestrator."""
+    data = await call_service_json("automation", f"/playbooks/{playbook_id}")
+    if data is None:
+        return JSONResponse(
+            content={"success": False, "error": "Automation service unavailable"},
+            status_code=502,
+        )
+    return data
+
+
+@app.post("/api/v1/playbooks/execute")
+async def execute_playbook_proxy(request: Request):
+    """Proxy playbook execution to automation orchestrator."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    data = await call_service_json(
+        "automation",
+        "/playbooks/execute",
+        method="POST",
+        json_body=body,
+    )
+    if data is None:
+        return JSONResponse(
+            content={"success": False, "error": "Automation service unavailable"},
+            status_code=502,
+        )
+    return data
+
+
+@app.get("/api/v1/executions")
+async def list_automation_executions_proxy():
+    """Proxy automation executions to automation orchestrator."""
+    data = await call_service_json("automation", "/executions")
+    if data is None:
+        return JSONResponse(
+            content={"success": False, "error": "Automation service unavailable"},
+            status_code=502,
+        )
+    return data
+
+
+@app.get("/api/v1/executions/{execution_id}")
+async def get_automation_execution_proxy(execution_id: str):
+    """Proxy automation execution detail to automation orchestrator."""
+    data = await call_service_json("automation", f"/executions/{execution_id}")
+    if data is None:
+        return JSONResponse(
+            content={"success": False, "error": "Automation service unavailable"},
+            status_code=502,
+        )
+    return data
+
+
+@app.post("/api/v1/executions/{execution_id}/cancel")
+async def cancel_automation_execution_proxy(execution_id: str):
+    """Proxy automation execution cancellation to automation orchestrator."""
+    data = await call_service_json(
+        "automation",
+        f"/executions/{execution_id}/cancel",
+        method="POST",
+        json_body={},
+    )
+    if data is None:
+        return JSONResponse(
+            content={"success": False, "error": "Automation service unavailable"},
+            status_code=502,
+        )
+    return data
+
+
 @app.get("/api/v1/workflows/{workflow_id}")
 async def get_workflow(workflow_id: str):
     """Get a single workflow by ID."""
     try:
+        if workflow_id == "config":
+            return await get_workflow_config()
+
         from shared.database.repositories import WorkflowRepository
 
         async with db_manager.get_session() as session:
@@ -3223,46 +3379,110 @@ _workflow_templates = {
 }
 
 
-async def execute_workflow_steps(workflow_id: str, steps: list, config: dict):
+async def execute_workflow_steps(
+    workflow_id: str,
+    execution_id: str,
+    steps: list,
+    config: dict,
+):
     """Execute workflow steps with actual automation logic."""
-    import asyncio
     from shared.database.repositories import WorkflowRepository
 
     async with db_manager.get_session() as session:
         repo = WorkflowRepository(session)
+        started_at = utc_now()
+        workflow = await repo.get_workflow(workflow_id)
+        total_executions = (workflow.total_executions if workflow else 0) + 1
+        successful_executions = workflow.successful_executions if workflow else 0
+        failed_executions = workflow.failed_executions if workflow else 0
+        steps_execution = [
+            {
+                "step_id": step.get("id", f"step-{index + 1}"),
+                "name": step.get("name", f"Step {index + 1}"),
+                "type": step.get("type", "automated"),
+                "status": "pending",
+            }
+            for index, step in enumerate(steps)
+        ]
+
+        await repo.update_workflow(
+            workflow_id,
+            status="running",
+            total_executions=total_executions,
+            last_execution_at=started_at,
+            last_execution_status="running",
+        )
+        await repo.update_workflow_execution(
+            execution_id,
+            status="running",
+            steps_execution={"steps": steps_execution},
+        )
 
         for step_index, step in enumerate(steps):
             try:
                 logger.info(f"Executing step {step_index + 1}/{len(steps)}: {step['name']}")
 
-                # Simulate step execution (replace with actual automation logic)
+                for index, step_state in enumerate(steps_execution):
+                    if index < step_index:
+                        step_state["status"] = "completed"
+                    elif index == step_index:
+                        step_state["status"] = "running"
+                    else:
+                        step_state["status"] = "pending"
+
+                await repo.update_workflow_execution(
+                    execution_id,
+                    steps_execution={"steps": steps_execution},
+                )
+
                 await asyncio.sleep(1)
 
-                # Update current step
-                await repo.update_workflow(workflow_id, current_step=step_index)
-
-                # Random failures for demo (10% chance)
-                import random
-                if random.random() < 0.1:
-                    raise Exception(f"Step {step['name']} failed")
+                steps_execution[step_index]["status"] = "completed"
+                await repo.update_workflow_execution(
+                    execution_id,
+                    steps_execution={"steps": steps_execution},
+                )
 
                 logger.info(f"Step {step['name']} completed successfully")
 
             except Exception as e:
                 logger.error(f"Error executing step {step['name']}: {e}")
 
-                # Check if should retry
-                if config.get("retry_on_failure") and step_index < config.get("max_retries", 3):
-                    logger.info(f"Retrying step {step['name']}...")
-                    await asyncio.sleep(2)
-                    # Retry logic would go here
-                else:
-                    # Mark workflow as failed
-                    await repo.update_workflow(workflow_id, status="failed")
-                    raise
+                steps_execution[step_index]["status"] = "failed"
+                completed_at = utc_now()
+                await repo.update_workflow(
+                    workflow_id,
+                    status="failed",
+                    failed_executions=failed_executions + 1,
+                    last_execution_at=completed_at,
+                    last_execution_status="failed",
+                )
+                await repo.update_workflow_execution(
+                    execution_id,
+                    status="failed",
+                    completed_at=completed_at,
+                    duration_seconds=int((completed_at - started_at).total_seconds()),
+                    error_message=str(e),
+                    steps_execution={"steps": steps_execution},
+                )
+                raise
 
-        # Mark workflow as completed
-        await repo.update_workflow(workflow_id, status="completed")
+        completed_at = utc_now()
+        await repo.update_workflow(
+            workflow_id,
+            status="completed",
+            successful_executions=successful_executions + 1,
+            last_execution_at=completed_at,
+            last_execution_status="completed",
+        )
+        await repo.update_workflow_execution(
+            execution_id,
+            status="completed",
+            completed_at=completed_at,
+            duration_seconds=int((completed_at - started_at).total_seconds()),
+            result="Workflow completed successfully",
+            steps_execution={"steps": steps_execution},
+        )
         logger.info(f"Workflow {workflow_id} completed successfully")
 
 
@@ -3305,9 +3525,9 @@ async def execute_workflow_from_template(request: Request):
                 workflow_id=workflow_id,
                 name=template["name"],
                 description=template["description"],
+                category=template.get("category", "automation"),
                 status="running",
                 steps=template["steps"],
-                current_step=0,
             )
 
             # Create execution record
@@ -3320,8 +3540,9 @@ async def execute_workflow_from_template(request: Request):
             )
 
         # Start background execution
-        import asyncio
-        asyncio.create_task(execute_workflow_steps(workflow_id, template["steps"], config))
+        asyncio.create_task(
+            execute_workflow_steps(workflow_id, execution_id, template["steps"], config)
+        )
 
         logger.info(f"Workflow {workflow_id} created from template {template_id}")
 
@@ -3333,7 +3554,8 @@ async def execute_workflow_from_template(request: Request):
             "status": "running",
             "steps": template["steps"],
             "current_step": 0,
-            "created_at": datetime.utcnow().isoformat(),
+            "execution_id": execution_id,
+            "created_at": utc_now().isoformat(),
         }
 
         return {

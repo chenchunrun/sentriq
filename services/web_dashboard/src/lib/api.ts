@@ -101,8 +101,8 @@ export const authApi = {
    * Login with username and password
    */
   login: async (credentials: LoginCredentials): Promise<AuthToken> => {
-    const response = await apiClient.post<AuthToken>('/auth/login', credentials)
-    const token = response.data
+    const response = await apiClient.post<ApiResponse<AuthToken>>('/auth/login', credentials)
+    const token = response.data.data
 
     // Store tokens
     localStorage.setItem('access_token', token.access_token)
@@ -132,11 +132,11 @@ export const authApi = {
       throw new Error('No refresh token available')
     }
 
-    const response = await apiClient.post<AuthToken>('/auth/refresh', {
+    const response = await apiClient.post<ApiResponse<AuthToken>>('/auth/refresh', {
       refresh_token: refreshToken,
     })
 
-    const token = response.data
+    const token = response.data.data
     localStorage.setItem('access_token', token.access_token)
     localStorage.setItem('refresh_token', token.refresh_token)
 
@@ -147,8 +147,8 @@ export const authApi = {
    * Fetch authenticated user profile
    */
   me: async (): Promise<AuthUser> => {
-    const response = await apiClient.get<AuthUser>('/auth/me')
-    return response.data
+    const response = await apiClient.get<ApiResponse<AuthUser>>('/auth/me')
+    return response.data.data
   },
 }
 
@@ -177,16 +177,27 @@ export const alertApi = {
     const response = await apiClient.get<ApiResponse<Alert[]>>('/alerts', {
       params,
     })
-    const items = response.data.data || []
-    const meta = response.data.meta || {}
-    const total = Number(meta.total || items.length || 0)
+    const payload = response.data.data as Alert[] | {
+      data?: Alert[]
+      total?: number
+      page?: number
+      page_size?: number
+      total_pages?: number
+    }
+    const items = Array.isArray(payload) ? payload : payload?.data || []
+    const total = Number(
+      (Array.isArray(payload) ? undefined : payload?.total) || response.data.meta?.total || items.length || 0
+    )
 
     return {
       data: items,
       total,
       page,
       page_size: pageSize,
-      total_pages: Math.max(1, Math.ceil(total / pageSize)),
+      total_pages: Math.max(
+        1,
+        Number((Array.isArray(payload) ? undefined : payload?.total_pages) || Math.ceil(total / pageSize))
+      ),
     }
   },
 

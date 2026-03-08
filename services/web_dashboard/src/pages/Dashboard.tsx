@@ -151,6 +151,9 @@ export const Dashboard: React.FC = () => {
     value: alert.count,
     percentage: alert.percentage,
   })) || []
+  const hasSeverityData = severityData.some((item) => item.value > 0)
+  const hasStatusData = statusData.some((item) => item.value > 0)
+  const hasTypeData = typeData.some((item) => item.value > 0)
 
   if (metricsLoading || topAlertsLoading) {
     return (
@@ -204,7 +207,7 @@ export const Dashboard: React.FC = () => {
         <MetricCard
           title="Total Alerts"
           value={totalAlerts.toLocaleString()}
-          change={12}
+          change={totalAlerts > 0 ? 12 : undefined}
           icon={<AlertTriangle className="w-6 h-6 text-white" />}
           color="primary"
         />
@@ -217,14 +220,14 @@ export const Dashboard: React.FC = () => {
         <MetricCard
           title="Avg Resolution Time"
           value={`${Math.round(avgResolutionTime)}m`}
-          change={-8}
+          change={avgResolutionTime > 0 ? -8 : undefined}
           icon={<Clock className="w-6 h-6 text-white" />}
           color="warning"
         />
         <MetricCard
           title="MTTR"
           value={`${Math.round(mttr)}m`}
-          change={-15}
+          change={mttr > 0 ? -15 : undefined}
           icon={<CheckCircle className="w-6 h-6 text-white" />}
           color="success"
         />
@@ -241,26 +244,32 @@ export const Dashboard: React.FC = () => {
             </div>
           </div>
           <div className="card-body">
-            <ResponsiveContainer width="100%" height={300}>
-              <RechartsPieChart>
-                <Pie
-                  data={severityData}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                  outerRadius={80}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {severityData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.fill} />
-                  ))}
-                </Pie>
-                <Tooltip />
-                <Legend />
-              </RechartsPieChart>
-            </ResponsiveContainer>
+            {hasSeverityData ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <RechartsPieChart>
+                  <Pie
+                    data={severityData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {severityData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.fill} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                  <Legend />
+                </RechartsPieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-[300px] items-center justify-center text-sm text-gray-500">
+                No alert severity data available yet.
+              </div>
+            )}
           </div>
         </div>
 
@@ -273,21 +282,27 @@ export const Dashboard: React.FC = () => {
             </div>
           </div>
           <div className="card-body">
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={typeData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="name"
-                  angle={-45}
-                  textAnchor="end"
-                  height={60}
-                  fontSize={12}
-                />
-                <YAxis />
-                <Tooltip />
-                <Bar dataKey="value" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {hasTypeData ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={typeData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis
+                    dataKey="name"
+                    angle={-45}
+                    textAnchor="end"
+                    height={60}
+                    fontSize={12}
+                  />
+                  <YAxis />
+                  <Tooltip />
+                  <Bar dataKey="value" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-[300px] items-center justify-center text-sm text-gray-500">
+                No alert type distribution available yet.
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -303,26 +318,32 @@ export const Dashboard: React.FC = () => {
             </div>
           </div>
           <div className="card-body">
-            <ResponsiveContainer width="100%" height={300}>
-              <RechartsPieChart>
-                <Pie
-                  data={statusData}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                  outerRadius={80}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {statusData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.fill} />
-                  ))}
-                </Pie>
-                <Tooltip />
-                <Legend />
-              </RechartsPieChart>
-            </ResponsiveContainer>
+            {hasStatusData ? (
+              <ResponsiveContainer width="100%" height={300}>
+                <RechartsPieChart>
+                  <Pie
+                    data={statusData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    outerRadius={80}
+                    fill="#8884d8"
+                    dataKey="value"
+                  >
+                    {statusData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.fill} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                  <Legend />
+                </RechartsPieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-[300px] items-center justify-center text-sm text-gray-500">
+                No alert status data available yet.
+              </div>
+            )}
           </div>
         </div>
 

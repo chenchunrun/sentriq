@@ -202,7 +202,15 @@ async def fetch_triage_metrics(start_date: datetime, end_date: datetime) -> Tria
                     SELECT
                         COUNT(*) AS total,
                         COUNT(*) FILTER (WHERE requires_human_review = true) AS human_reviewed,
-                        AVG(processing_time_ms) AS avg_processing_ms,
+                        AVG(
+                            CASE
+                                WHEN updated_at IS NOT NULL
+                                 AND created_at IS NOT NULL
+                                 AND updated_at >= created_at
+                                THEN EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000.0
+                                ELSE NULL
+                            END
+                        ) AS avg_processing_ms,
                         AVG(confidence_score) AS avg_confidence
                     FROM triage_results
                     WHERE created_at BETWEEN :start AND :end
