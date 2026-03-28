@@ -40,7 +40,7 @@ After comprehensive verification, the Docker Compose deployment is **NOW READY**
 ✓ reporting_service/Dockerfile
 ✓ monitoring_metrics/Dockerfile
 ✓ notification_service/Dockerfile
-✓ web_dashboard/Dockerfile
+✓ services/web_dashboard/Dockerfile
 ```
 
 ### 2. Requirements.txt Coverage ✅
@@ -62,7 +62,7 @@ After comprehensive verification, the Docker Compose deployment is **NOW READY**
 ✓ reporting_service/requirements.txt
 ✓ monitoring_metrics/requirements.txt
 ✓ notification_service/requirements.txt
-✓ web_dashboard/requirements.txt
+✓ services/web_dashboard/requirements.txt
 ✓ shared/requirements.txt
 ✓ configuration_service/requirements.txt
 ```
@@ -91,7 +91,7 @@ Remaining service-to-service localhost: 0 ✓
 **Note**: 20 localhost references remain (health checks + external access URLs):
 - Health check commands: `curl -f http://localhost:8000/health` (18)
 - Kong Admin GUI: `http://localhost:8002` (1)
-- Web Dashboard API: `http://localhost:8001` (1)
+- Web Dashboard API: `http://localhost:9001` (1)
 - ✅ These are CORRECT and should NOT be changed
 
 ### 4. Docker Compose Syntax ✅
@@ -178,13 +178,13 @@ docker-compose up -d postgres redis rabbitmq chromadb
 - workflow-engine (9008)
 - automation-orchestrator (9009)
 
-**Stage 5: Support Services** (Port 9010-9015)
+**Stage 5: Support Services** (Port 9010-9014 plus web dashboard on 3100)
 - configuration-service (9010)
 - data-analytics (9011)
 - reporting-service (9012)
 - notification-service (9013)
 - monitoring-metrics (9014) [monitoring profile]
-- web-dashboard (9015)
+- web-dashboard (3100 host -> 8000 container)
 
 ### API Gateway
 - kong (8000, 8001, 8443, 8444)

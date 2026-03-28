@@ -108,20 +108,20 @@ Network:
 **服务监控**:
 ```python
 Monitored Services (14 total):
-├─ alert_ingestor (port 8000)
-├─ alert_normalizer (port 8000/*)
-├─ context_collector (port 8000/*)
-├─ threat_intel_aggregator (port 8000/*)
-├─ llm_router (port 8001)
-├─ ai_triage_agent (port 8002)
-├─ similarity_search (port 8003)
-├─ workflow_engine (port 8004)
-├─ automation_orchestrator (port 8005)
-├─ data_analytics (port 8006)
-├─ reporting_service (port 8007)
-├─ notification_service (port 8008)
-├─ configuration_service (port 8009)
-└─ web_dashboard (port 8010)
+├─ alert_ingestor (port 9001)
+├─ alert_normalizer (port 9002)
+├─ context_collector (port 9003)
+├─ threat_intel_aggregator (port 9004)
+├─ llm_router (port 9005)
+├─ ai_triage_agent (port 9006)
+├─ similarity_search (port 9007)
+├─ workflow_engine (port 9008)
+├─ automation_orchestrator (port 9009)
+├─ data_analytics (port 9011)
+├─ reporting_service (port 9012)
+├─ notification_service (port 9013)
+├─ configuration_service (port 9014)
+└─ web_dashboard (port 3100)
 ```
 
 **Prometheus集成**:
@@ -173,7 +173,7 @@ GET /metrics
    ↓ HTTP
 ┌──────────────────┐
 │  Web Dashboard   │
-│  (port 8010)     │
+│  (port 3100)     │
 │                  │
 │ • API Proxy      │
 │ • HTML Pages     │
@@ -181,13 +181,13 @@ GET /metrics
 └──────────────────┘
    │
    ↓ API Calls
-各后端服务 (8000-8010)
+各后端服务 (9001-9014)
    │
    ↓ Health Checks
 ┌──────────────────┐
 │ Monitoring &     │
 │ Metrics          │
-│ (port 8011)      │
+│ (port 9014)      │
 │                  │
 │ • System Metrics │
 │ • Service Health │
@@ -206,7 +206,7 @@ Grafana (可选)
 
 ```
 services/
-├── web_dashboard/
+├── services/web_dashboard/
 │   ├── main.py                    ✅ Web仪表板服务
 │   ├── static/                    (静态文件，可选)
 │   └── requirements.txt           ✅ 服务依赖
@@ -227,13 +227,13 @@ Dashboard通过API代理与所有后端服务集成：
 ```python
 # Dashboard自动代理请求
 GET /api/proxy/analytics/dashboard
-→ http://localhost:8006/api/v1/dashboard
+→ http://localhost:9011/api/v1/dashboard
 
 GET /api/proxy/workflow/workflows/definitions
-→ http://localhost:8004/api/v1/workflows/definitions
+→ http://localhost:9008/api/v1/workflows/definitions
 
 POST /api/proxy/reporting/reports/generate
-→ http://localhost:8007/api/v1/reports/generate
+→ http://localhost:9012/api/v1/reports/generate
 ```
 
 ### 2. Monitoring集成
@@ -261,7 +261,7 @@ Prometheus定期抓取指标：
 scrape_configs:
   - job_name: 'security-triage'
     static_configs:
-      - targets: ['localhost:8011']
+      - targets: ['localhost:9014']
     scrape_interval: 30s
 ```
 
@@ -285,18 +285,18 @@ pip install -r requirements.txt
 
 ```bash
 # Optional: Configure service URLs
-export ALERT_INGESTOR_URL="http://localhost:8000"
-export LLM_ROUTER_URL="http://localhost:8001"
+export ALERT_INGESTOR_URL="http://localhost:9001"
+export LLM_ROUTER_URL="http://localhost:9005"
 # ... etc
 ```
 
 ### 3. 启动服务
 
 ```bash
-# Terminal 1: Web Dashboard (port 8010)
+# Terminal 1: Web Dashboard (port 3100 via docker-compose, app listens on 8000 internally)
 cd services/web_dashboard && python main.py
 
-# Terminal 2: Monitoring & Metrics (port 8011)
+# Terminal 2: Monitoring & Metrics (port 9014 via docker-compose, app listens on 8000 internally)
 cd services/monitoring_metrics && python main.py
 ```
 
@@ -304,16 +304,16 @@ cd services/monitoring_metrics && python main.py
 
 ```bash
 # Web Dashboard
-open http://localhost:8010
+open http://localhost:3100
 
 # Prometheus Metrics
-curl http://localhost:8011/metrics
+curl http://localhost:9014/metrics
 
 # Service Health
-curl http://localhost:8011/api/v1/health/services
+curl http://localhost:9014/api/v1/health/services
 
 # System Metrics
-curl http://localhost:8011/api/v1/metrics/system
+curl http://localhost:9014/api/v1/metrics/system
 ```
 
 ---

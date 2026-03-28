@@ -68,6 +68,22 @@ That's it! The system will:
 
 **Access the Dashboard**: http://localhost:3000
 
+### Frontend Without Host Node Changes
+
+If you want to work on the active frontend without changing the host Node version:
+
+```bash
+./scripts/frontend-dev.sh
+```
+
+To verify the frontend build in a supported containerized runtime:
+
+```bash
+./scripts/frontend-build.sh
+```
+
+The active frontend lives in `services/web_dashboard/`.
+
 ---
 
 ## 📁 Project Structure
@@ -89,7 +105,7 @@ security-triage/
 │   ├── user_management/        # RBAC and authentication
 │   ├── reporting_service/      # Report generation
 │   ├── data_analytics/         # Analytics processing
-│   └── web_dashboard/          # React frontend
+│   └── web_dashboard/          # React frontend (active path inside services/)
 ├── shared/                      # Shared libraries
 │   ├── models/                 # Pydantic data models
 │   ├── database/               # Database utilities

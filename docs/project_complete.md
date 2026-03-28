@@ -215,7 +215,7 @@ security_triage/
 │   ├── reporting_service/         # 报告服务
 │   ├── notification_service/      # 通知服务
 │   ├── configuration_service/     # 配置管理
-│   ├── web_dashboard/             # Web界面
+│   ├── web_dashboard/             # Web界面（当前主线目录；旧独立前端已归档到 archived/web_dashboard_legacy/）
 │   └── monitoring_metrics/        # 监控服务
 │
 ├── docs/                          # 文档
@@ -395,15 +395,15 @@ cd services/monitoring_metrics && python main.py &
 ### 3. 访问系统
 ```bash
 # Web Dashboard
-open http://localhost:8010
+open http://localhost:3100
 
 # API文档 (Swagger UI)
-open http://localhost:8000/docs
-open http://localhost:8001/docs
+open http://localhost:9001/docs
+open http://localhost:9005/docs
 # ... etc
 
 # Prometheus Metrics
-curl http://localhost:8011/metrics
+curl http://localhost:9014/metrics
 ```
 
 ---

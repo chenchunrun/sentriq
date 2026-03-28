@@ -25,7 +25,7 @@ Stage 5 实现了安全告警研判系统的**支持服务和前端界面**,包�
 
 ### 1. Data Analytics Service (数据分析服务)
 
-**端口**: 8011
+**端口**: 9011
 **容器名**: security-triage-data-analytics
 **Dockerfile**: `services/data_analytics/Dockerfile`
 
@@ -50,14 +50,14 @@ LOG_LEVEL=INFO
 
 **健康检查**:
 ```bash
-curl -f http://localhost:8011/health
+curl -f http://localhost:9011/health
 ```
 
 ---
 
 ### 2. Reporting Service (报表服务)
 
-**端口**: 8012
+**端口**: 9012
 **容器名**: security-triage-reporting-service
 **Dockerfile**: `services/reporting_service/Dockerfile`
 
@@ -83,14 +83,14 @@ LOG_LEVEL=INFO
 
 **健康检查**:
 ```bash
-curl -f http://localhost:8012/health
+curl -f http://localhost:9012/health
 ```
 
 ---
 
 ### 3. Configuration Service (配置服务)
 
-**端口**: 8013
+**端口**: 9013
 **容器名**: security-triage-configuration-service
 **Dockerfile**: `services/configuration_service/Dockerfile`
 
@@ -115,14 +115,14 @@ LOG_LEVEL=INFO
 
 **健康检查**:
 ```bash
-curl -f http://localhost:8013/health
+curl -f http://localhost:9013/health
 ```
 
 ---
 
 ### 4. Monitoring Metrics Service (监控指标服务)
 
-**端口**: 8014
+**端口**: 9014
 **容器名**: security-triage-monitoring-metrics
 **Dockerfile**: `services/monitoring_metrics/Dockerfile`
 
@@ -149,7 +149,7 @@ LOG_LEVEL=INFO
 
 **健康检查**:
 ```bash
-curl -f http://localhost:8014/health
+curl -f http://localhost:9014/health
 ```
 
 **Prometheus 集成**:
@@ -166,7 +166,7 @@ scrape_configs:
 
 ### 5. Web Dashboard (Web仪表板)
 
-**端口**: 8015
+**端口**: 3100 (host) -> 8000 (container)
 **容器名**: security-triage-web-dashboard
 **Dockerfile**: `services/web_dashboard/Dockerfile`
 
@@ -186,7 +186,7 @@ scrape_configs:
 
 **环境变量**:
 ```bash
-API_BASE_URL=http://localhost:8001
+API_BASE_URL=http://localhost:9001
 ANALYTICS_SERVICE_URL=http://data-analytics:8000
 REPORTING_SERVICE_URL=http://reporting-service:8000
 CONFIG_SERVICE_URL=http://configuration-service:8000
@@ -197,12 +197,12 @@ LOG_LEVEL=INFO
 
 **健康检查**:
 ```bash
-curl -f http://localhost:8015/health
+curl -f http://localhost:3100/health
 ```
 
 **访问地址**:
 ```
-http://localhost:8015
+http://localhost:3100
 ```
 
 ---
@@ -260,25 +260,25 @@ CMD ["python", "main.py"]
 ```
 Stage 5 服务依赖关系:
 
-data-analytics (8011)
+data-analytics (9011)
   ├─ postgres
   └─ redis
 
-reporting-service (8012)
+reporting-service (9012)
   ├─ postgres
   ├─ redis
   └─ data-analytics
 
-configuration-service (8013)
+configuration-service (9013)
   ├─ postgres
   └─ redis
 
-monitoring-metrics (8014)
+monitoring-metrics (9014)
   ├─ postgres
   ├─ redis
   └─ prometheus
 
-web-dashboard (8015)
+web-dashboard (3100 host -> 8000 container)
   ├─ data-analytics
   ├─ reporting-service
   └─ configuration-service
@@ -288,11 +288,11 @@ web-dashboard (8015)
 
 | 服务 | 内部端口 | 外部端口 | 协议 |
 |------|---------|---------|------|
-| Data Analytics | 8000 | 8011 | HTTP |
-| Reporting Service | 8000 | 8012 | HTTP |
-| Configuration Service | 8000 | 8013 | HTTP |
-| Monitoring Metrics | 8000 | 8014 | HTTP |
-| Web Dashboard | 8000 | 8015 | HTTP |
+| Data Analytics | 8000 | 9011 | HTTP |
+| Reporting Service | 8000 | 9012 | HTTP |
+| Configuration Service | 8000 | 9013 | HTTP |
+| Monitoring Metrics | 8000 | 9014 | HTTP |
+| Web Dashboard | 8000 | 3100 | HTTP |
 
 ### 网络配置
 
@@ -383,7 +383,7 @@ SMTP_PASSWORD=your-app-password
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 
 # Web Dashboard
-API_BASE_URL=http://localhost:8001
+API_BASE_URL=http://localhost:9001
 ANALYTICS_SERVICE_URL=http://data-analytics:8000
 REPORTING_SERVICE_URL=http://reporting-service:8000
 CONFIG_SERVICE_URL=http://configuration-service:8000
@@ -421,17 +421,17 @@ docker-compose logs -f web-dashboard
 
 ```bash
 # 检查所有服务健康状态
-curl http://localhost:8011/health  # Data Analytics
-curl http://localhost:8012/health  # Reporting Service
-curl http://localhost:8013/health  # Configuration Service
-curl http://localhost:8014/health  # Monitoring Metrics
-curl http://localhost:8015/health  # Web Dashboard
+curl http://localhost:9011/health  # Data Analytics
+curl http://localhost:9012/health  # Reporting Service
+curl http://localhost:9013/health  # Configuration Service
+curl http://localhost:9014/health  # Monitoring Metrics
+curl http://localhost:3100/health  # Web Dashboard
 ```
 
 ### 访问 Web Dashboard
 
 ```
-http://localhost:8015
+http://localhost:3100
 ```
 
 默认用户名/密码 (需要在配置服务中配置):
@@ -626,7 +626,7 @@ services/
 │   ├── Dockerfile                    ✅ 新建
 │   ├── main.py                       ✅ 已有 (框架代码)
 │   └── requirements.txt              ✅ 已有
-└── web_dashboard/
+└── services/web_dashboard/
     ├── Dockerfile                    ✅ 新建
     ├── main.py                       ✅ 已有 (FastAPI 后端)
     ├── requirements.txt              ✅ 已有

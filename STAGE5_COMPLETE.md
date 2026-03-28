@@ -35,7 +35,7 @@ services/
 ├── reporting_service/Dockerfile       ✅ 新建
 ├── configuration_service/Dockerfile   ✅ 新建
 ├── monitoring_metrics/Dockerfile      ✅ 新建
-└── web_dashboard/Dockerfile           ✅ 新建
+└── services/web_dashboard/Dockerfile  ✅ 新建
 ```
 
 **特点**:

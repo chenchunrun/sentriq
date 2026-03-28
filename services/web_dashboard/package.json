@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Security Alert Triage System - Web Dashboard",
   "type": "module",
+  "engines": {
+    "node": ">=20 <25"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

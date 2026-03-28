@@ -885,7 +885,7 @@ services:
       ZHIPUAI_API_KEY: ${ZHIPUAI_API_KEY}
       ZHIPUAI_BASE_URL: ${ZHIPUAI_BASE_URL:-https://open.bigmodel.cn/api/paas/v4/}
       # Backend Services
-      API_BASE_URL: ${API_BASE_URL:-http://localhost:8001}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:9001}
       ANALYTICS_SERVICE_URL: ${ANALYTICS_SERVICE_URL:-http://data-analytics:8000}
       REPORTING_SERVICE_URL: ${REPORTING_SERVICE_URL:-http://reporting-service:8000}
       NOTIFICATION_SERVICE_URL: ${NOTIFICATION_SERVICE_URL:-http://notification-service:8000}

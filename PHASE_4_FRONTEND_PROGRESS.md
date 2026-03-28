@@ -296,7 +296,7 @@ curl "http://localhost:8080/api/v1/analytics/dashboard?time_range=24h"
 
 ```bash
 # 1. Navigate to web dashboard
-cd /Users/newmba/security/web_dashboard
+cd /Users/newmba/security/services/web_dashboard
 
 # 2. Install dependencies
 npm install
@@ -331,7 +331,7 @@ open http://localhost:3000
 ## 🔄 Next Steps: Future Enhancements
 
 ```
-web_dashboard/
+services/web_dashboard/
 ├── public/
 │   └── index.html
 ├── src/

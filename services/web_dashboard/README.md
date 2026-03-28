@@ -14,6 +14,17 @@ React + TypeScript + Tailwind CSS 前端应用,为安全告警研判系统提供
 - **图表**: Recharts 2.12
 - **图标**: Lucide React 0.344
 
+## Node 版本要求
+
+- 推荐使用 **Node 20**
+- 兼容范围: `>=20 <25`
+
+说明:
+
+- 当前目录的前端工具链依赖 `Vite 5 + Rollup 4`
+- 在本机 `Node 25.2.1` 环境下，`vite`/`rollup` CLI 会卡住，`esbuild` 正常
+- Dockerfile 已使用 `node:20-alpine`，因此容器构建路径与该要求一致
+
 ## 项目结构
 
 ```
@@ -50,6 +61,9 @@ services/web_dashboard/
 # 进入前端目录
 cd services/web_dashboard
 
+# 切换到推荐 Node 版本
+nvm use
+
 # 安装依赖
 npm install
 
@@ -76,16 +90,36 @@ docker-compose up -d web-dashboard
 docker-compose logs -f web-dashboard
 ```
 
+### 容器化前端开发
+
+如果你不想调整宿主机 Node 版本，直接从项目根目录运行：
+
+```bash
+./scripts/frontend-dev.sh
+```
+
+容器化构建：
+
+```bash
+./scripts/frontend-build.sh
+```
+
 ### 环境变量
 
 创建 `.env.local` 文件 (开发环境):
 
 ```bash
-# API Base URL (Kong Gateway)
-VITE_API_BASE_URL=http://localhost:8000
+# Primary API entrypoint
+VITE_API_BASE_URL=http://localhost:9001
 
 # WebSocket URL
-VITE_WS_BASE_URL=ws://localhost:8000
+VITE_WS_BASE_URL=ws://localhost:9001
+
+# Optional service-specific overrides
+VITE_WORKFLOW_API_BASE_URL=http://localhost:9008
+VITE_REPORTS_API_BASE_URL=http://localhost:9012
+VITE_CONFIG_API_BASE_URL=http://localhost:9013
+VITE_AUTOMATION_API_BASE_URL=http://localhost:9009
 ```
 
 ## 主要功能
@@ -115,7 +149,7 @@ VITE_WS_BASE_URL=ws://localhost:8000
 
 ## API 集成
 
-前端通过 Kong Gateway 与后端 API 通信:
+前端默认通过 `alert-ingestor` 入口和已映射的服务端口通信；如果你本地启用了独立 API Gateway，再按需覆盖环境变量。
 
 ```typescript
 // API 基础路径

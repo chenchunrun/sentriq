@@ -1,5 +1,11 @@
 # Security Triage System - Web Dashboard
 
+Legacy frontend reference.
+
+This directory is no longer the primary frontend implementation for the repository.
+The active frontend lives in [`/Users/newmba/security/services/web_dashboard`](/Users/newmba/security/services/web_dashboard).
+Use that directory for current development, Docker builds, and runtime integration.
+
 React-based web dashboard for the Security Alert Triage System.
 
 ## Overview

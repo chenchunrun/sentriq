@@ -47,8 +47,11 @@ curl -X POST http://localhost:9001/api/v1/alerts \
 
 **1. Web Dashboard**
 ```bash
-# Open in browser
-open web_dashboard/dashboard.html
+# Start the active frontend service path
+./start-dev.sh
+
+# Then open in browser
+open http://localhost:3000
 ```
 
 **2. Database Query**
@@ -107,7 +110,7 @@ docker-compose logs -f --tail=50 threat-intel-aggregator
 - **Context Enrichment**: JSON-based asset/user lookup
 - **Threat Intelligence**: Internal IOC database (7 IOCs)
 - **LLM Integration**: Mock mode for development
-- **Web Dashboard**: Single-page HTML interface
+- **Web Dashboard**: Active frontend lives in `services/web_dashboard/`
 - **Message Queue**: RabbitMQ async processing
 
 ### 📁 Data Files (JSON-based)

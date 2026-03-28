@@ -25,6 +25,7 @@ NC='\033[0m' # No Color
 MODE=${1:-dev}
 COMPOSE_FILE="docker-compose.dev.yml"
 PROJECT_NAME="security-triage"
+WEB_DASHBOARD_URL="http://localhost:3000"
 
 # Helper functions
 print_header() {
@@ -118,8 +119,13 @@ check_status() {
         "alert-normalizer:9002"
         "context-collector:9003"
         "ai-triage-agent:9006"
-        "web-dashboard:3000"
     )
+
+    if [ "$MODE" = "prod" ]; then
+        services+=("web-dashboard:3100")
+    else
+        services+=("web-dashboard:3000")
+    fi
 
     for service in "${services[@]}"; do
         name=$(echo $service | cut -d: -f1)
@@ -134,7 +140,7 @@ check_status() {
 
     echo ""
     print_header "Access URLs"
-    echo "  Web Dashboard:    http://localhost:3000"
+    echo "  Web Dashboard:    $WEB_DASHBOARD_URL"
     echo "  RabbitMQ UI:      http://localhost:15673 (admin/rabbitmq_password)"
     echo "  Alert Ingestor:   http://localhost:9001"
     echo "  AI Triage Agent:  http://localhost:9006"
@@ -150,10 +156,12 @@ start_services() {
     # Select compose file
     if [ "$MODE" = "prod" ]; then
         COMPOSE_FILE="docker-compose.yml"
+        WEB_DASHBOARD_URL="http://localhost:3100"
         print_warning "Starting in PRODUCTION mode (all 15 services)"
         print_warning "This will use significant system resources"
     else
         COMPOSE_FILE="docker-compose.dev.yml"
+        WEB_DASHBOARD_URL="http://localhost:3000"
         print_success "Starting in DEVELOPMENT mode (core services only)"
     fi
     echo ""
@@ -222,7 +230,7 @@ start_services() {
     check_status
 
     print_header "Next Steps"
-    echo "1. Open http://localhost:3000 in your browser"
+    echo "1. Open $WEB_DASHBOARD_URL in your browser"
     echo "2. View logs: ./start-dev.sh logs"
     echo "3. Check status: ./start-dev.sh status"
     echo "4. Stop services: ./start-dev.sh stop"

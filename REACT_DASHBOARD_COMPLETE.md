@@ -10,13 +10,15 @@
 
 The React Dashboard for the Security Triage System has been **successfully completed** with full closed-loop delivery. The dashboard provides a modern, responsive web interface for monitoring and managing security alerts with AI-powered triage analysis.
 
+Note: the active frontend path for the repository is now `services/web_dashboard/`. The old standalone frontend has been archived to `archived/web_dashboard_legacy/`.
+
 ---
 
 ## Deliverables
 
 ### 1. Complete React Application ✅
 
-**Location**: `/Users/newmba/security/web_dashboard/`
+**Location**: `/Users/newmba/security/services/web_dashboard/`
 
 **Key Features**:
 - 3 major pages: Dashboard, Alert List, Alert Detail
@@ -198,7 +200,7 @@ The React Dashboard for the Security Triage System has been **successfully compl
 ### Installation
 
 ```bash
-cd /Users/newmba/security/web_dashboard
+cd /Users/newmba/security/services/web_dashboard
 npm install
 ```
 
@@ -212,7 +214,7 @@ python main.py
 ### Start Dashboard
 
 ```bash
-cd /Users/newmba/security/web_dashboard
+cd /Users/newmba/security/services/web_dashboard
 ./start.sh
 # Or: npm run dev
 ```

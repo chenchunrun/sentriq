@@ -150,7 +150,7 @@ security/
 │   ├── threat_intel_aggregator/
 │   ├── notification_service/      # Enhanced (NEW)
 │   ├── similarity_search/
-│   ├── web_dashboard/            # React UI
+│   ├── web_dashboard/            # React UI (active path: services/web_dashboard/)
 │   │   └── src/
 │   │       ├── pages/
 │   │       │   ├── Workflows.tsx (NEW)

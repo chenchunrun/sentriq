@@ -2,6 +2,16 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
+const devHost = process.env.VITE_DEV_HOST || '0.0.0.0'
+const devPort = Number(process.env.VITE_DEV_PORT || '3000')
+
+const workflowApiBaseUrl = process.env.VITE_WORKFLOW_API_BASE_URL || 'http://127.0.0.1:9008'
+const configApiBaseUrl = process.env.VITE_CONFIG_API_BASE_URL || 'http://127.0.0.1:9013'
+const reportsApiBaseUrl = process.env.VITE_REPORTS_API_BASE_URL || 'http://127.0.0.1:9012'
+const automationApiBaseUrl = process.env.VITE_AUTOMATION_API_BASE_URL || 'http://127.0.0.1:9009'
+const apiBaseUrl = process.env.VITE_API_BASE_URL || 'http://127.0.0.1:9001'
+const wsBaseUrl = process.env.VITE_WS_BASE_URL || 'ws://127.0.0.1:9001'
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
@@ -11,37 +21,35 @@ export default defineConfig({
     },
   },
   server: {
-    port: 9000,
-    host: '0.0.0.0',  // Listen on all interfaces
+    port: devPort,
+    host: devHost,
     proxy: {
       '/api/v1/workflows': {
-        target: process.env.VITE_WORKFLOW_API_BASE_URL || 'http://127.0.0.1:8018',
+        target: workflowApiBaseUrl,
         changeOrigin: true,
       },
       '/api/v1/config': {
-        target: process.env.VITE_CONFIG_API_BASE_URL || 'http://127.0.0.1:9009',
+        target: configApiBaseUrl,
         changeOrigin: true,
       },
       '/api/v1/reports': {
-        target: process.env.VITE_REPORTS_API_BASE_URL || 'http://127.0.0.1:9010',
+        target: reportsApiBaseUrl,
         changeOrigin: true,
       },
       '/api/v1/playbooks': {
-        target: process.env.VITE_AUTOMATION_API_BASE_URL || 'http://127.0.0.1:9005',
+        target: automationApiBaseUrl,
         changeOrigin: true,
       },
       '/api/v1/executions': {
-        target: process.env.VITE_AUTOMATION_API_BASE_URL || 'http://127.0.0.1:9005',
+        target: automationApiBaseUrl,
         changeOrigin: true,
       },
-      // Proxy API requests to API Gateway
       '/api': {
-        target: process.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000',
+        target: apiBaseUrl,
         changeOrigin: true,
       },
-      // Proxy WebSocket requests
       '/ws': {
-        target: process.env.VITE_WS_BASE_URL || 'ws://127.0.0.1:8000',
+        target: wsBaseUrl,
         ws: true,
       },
     },

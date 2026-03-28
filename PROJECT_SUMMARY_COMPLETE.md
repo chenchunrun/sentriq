@@ -151,7 +151,8 @@
 
 #### 2. React Dashboard (✅ 100% 完成)
 
-**位置**: `web_dashboard/`
+**位置**: `services/web_dashboard/`  
+**说明**: 旧的独立前端已归档到 `archived/web_dashboard_legacy/`
 
 **文件**: 25+个文件，3,500+ 行代码
 

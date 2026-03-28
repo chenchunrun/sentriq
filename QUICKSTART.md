@@ -2,6 +2,8 @@
 
 Get the **Security Alert Triage System** running in 5 minutes.
 
+This file describes the current recommended startup flow. For a concise reality-based summary, see [CURRENT_STARTUP_GUIDE.md](CURRENT_STARTUP_GUIDE.md).
+
 ---
 
 ## Step 1: Prerequisites (1 minute)
@@ -80,7 +82,7 @@ LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 # Make start script executable (macOS/Linux only)
 chmod +x start-dev.sh
 
-# Start development mode (8 core services)
+# Start development mode (current POC path)
 ./start-dev.sh
 ```
 
@@ -115,11 +117,22 @@ Open your browser and navigate to:
 
 You should see the Security Triage Dashboard!
 
+### Optional: Frontend-Only Container Path
+
+If your host Node version is not compatible with the frontend toolchain, use the containerized frontend scripts from the project root:
+
+```bash
+./scripts/frontend-dev.sh
+./scripts/frontend-build.sh
+```
+
+This runs the active frontend from `services/web_dashboard/` in a supported Node container without changing the host runtime.
+
 ---
 
 ## What's Running?
 
-### Development Mode (8 services)
+### Development Mode (current default)
 | Service | Port | Description |
 |---------|------|-------------|
 | PostgreSQL | 5434 | Main database |
@@ -132,11 +145,15 @@ You should see the Security Triage Dashboard!
 | AI Triage Agent | 9006 | AI analysis |
 | Web Dashboard | 3000 | Web UI |
 
+Development mode currently starts 9 containers total and is best treated as the current POC path rather than the full production graph.
+
 ### Production Mode (15 services)
 To start all services including monitoring, analytics, etc.:
 ```bash
 ./start-dev.sh prod
 ```
+
+In production mode, the current dashboard port is `3100`.
 
 ---
 
