@@ -22,7 +22,7 @@ Use this when you want the current multi-service demo path.
 
 ```bash
 cp .env.example .env
-./start-dev.sh
+docker compose -f docker-compose.dev.yml up -d
 ```
 
 Development mode starts these services:
@@ -47,13 +47,12 @@ Notes:
 Use this when you want to work on the active frontend without changing the host Node version.
 
 ```bash
-./scripts/frontend-dev.sh
-```
-
-Use this when you want to verify the active frontend build in a supported Node runtime.
-
-```bash
-./scripts/frontend-build.sh
+docker run --rm -it \
+  -p 3000:3000 \
+  -v "$PWD/services/web_dashboard:/app" \
+  -w /app \
+  node:22.16.0-bookworm \
+  bash -lc "npm ci && npm run dev -- --host 0.0.0.0 --port 3000"
 ```
 
 ### Path C: Full Compose
@@ -62,7 +61,7 @@ Use this only when you need the entire service graph.
 
 ```bash
 cp .env.example .env
-./start-dev.sh prod
+docker compose up -d
 ```
 
 Production mode uses `docker-compose.yml` and exposes the dashboard on `3100`.
@@ -85,7 +84,7 @@ Production mode uses `docker-compose.yml` and exposes the dashboard on `3100`.
 After startup, check:
 
 ```bash
-./start-dev.sh status
+docker compose -f docker-compose.dev.yml ps
 ```
 
 For dev mode, open:

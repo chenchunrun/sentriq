@@ -92,16 +92,25 @@ docker-compose logs -f web-dashboard
 
 ### 容器化前端开发
 
-如果你不想调整宿主机 Node 版本，直接从项目根目录运行：
+如果你不想调整宿主机 Node 版本，可以直接运行：
 
 ```bash
-./scripts/frontend-dev.sh
+docker run --rm -it \
+  -p 3000:3000 \
+  -v "$PWD:/app" \
+  -w /app \
+  node:22.16.0-bookworm \
+  bash -lc "npm ci && npm run dev -- --host 0.0.0.0 --port 3000"
 ```
 
 容器化构建：
 
 ```bash
-./scripts/frontend-build.sh
+docker run --rm \
+  -v "$PWD:/app" \
+  -w /app \
+  node:22.16.0-bookworm \
+  bash -lc "npm ci && npm run build"
 ```
 
 ### 环境变量

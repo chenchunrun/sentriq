@@ -51,8 +51,8 @@ The system needs an LLM API key to analyze alerts. Choose one:
 
 ```bash
 # Clone repository
-git clone https://github.com/yourname/security-triage.git
-cd security-triage
+git clone https://github.com/chenchunrun/sentriq.git
+cd sentriq
 
 # Create environment file
 cp .env.docker.example .env
@@ -79,21 +79,16 @@ LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ## Step 4: Start the System (1 minute)
 
 ```bash
-# Make start script executable (macOS/Linux only)
-chmod +x start-dev.sh
-
 # Start development mode (current POC path)
-./start-dev.sh
+docker compose -f docker-compose.dev.yml up -d
 ```
 
 **What happens:**
-1. ✅ Checks prerequisites
-2. ✅ Pulls Docker images (~2-3 minutes first time)
-3. ✅ Builds services (~2-3 minutes first time)
-4. ✅ Starts infrastructure (PostgreSQL, Redis, RabbitMQ, ChromaDB)
-5. ✅ Starts core services
-6. ✅ Runs health checks
-7. ✅ Displays access URLs
+1. ✅ Pulls Docker images (~2-3 minutes first time)
+2. ✅ Builds services (~2-3 minutes first time)
+3. ✅ Starts infrastructure (PostgreSQL, Redis, RabbitMQ, ChromaDB)
+4. ✅ Starts core services
+5. ✅ Exposes access URLs
 
 **Output:**
 ```
@@ -119,14 +114,16 @@ You should see the Security Triage Dashboard!
 
 ### Optional: Frontend-Only Container Path
 
-If your host Node version is not compatible with the frontend toolchain, use the containerized frontend scripts from the project root:
+If your host Node version is not compatible with the frontend toolchain, run the frontend directly in a supported container:
 
 ```bash
-./scripts/frontend-dev.sh
-./scripts/frontend-build.sh
+docker run --rm -it \
+  -p 3000:3000 \
+  -v "$PWD/services/web_dashboard:/app" \
+  -w /app \
+  node:22.16.0-bookworm \
+  bash -lc "npm ci && npm run dev -- --host 0.0.0.0 --port 3000"
 ```
-
-This runs the active frontend from `services/web_dashboard/` in a supported Node container without changing the host runtime.
 
 ---
 
@@ -150,7 +147,7 @@ Development mode currently starts 9 containers total and is best treated as the 
 ### Production Mode (15 services)
 To start all services including monitoring, analytics, etc.:
 ```bash
-./start-dev.sh prod
+docker compose up -d
 ```
 
 In production mode, the current dashboard port is `3100`.
@@ -205,7 +202,7 @@ lsof -i :3000  # macOS/Linux
 netstat -ano | findstr :3000  # Windows
 
 # Stop services
-./start-dev.sh stop
+docker compose -f docker-compose.dev.yml down
 ```
 
 ### Issue: "LLM API connection failed"
@@ -226,7 +223,7 @@ curl -X POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions 
 
 **Solution:** Check logs:
 ```bash
-./start-dev.sh logs
+docker compose -f docker-compose.dev.yml logs -f
 
 # Or check specific service
 docker-compose -f docker-compose.dev.yml logs ai-triage-agent
@@ -247,13 +244,13 @@ docker-compose -f docker-compose.dev.yml logs ai-triage-agent
 
 ```bash
 # Stop all services
-./start-dev.sh stop
+docker compose -f docker-compose.dev.yml down
 
 # View logs before stopping
-./start-dev.sh logs
+docker compose -f docker-compose.dev.yml logs -f
 
 # Check service status
-./start-dev.sh status
+docker compose -f docker-compose.dev.yml ps
 ```
 
 ---

@@ -42,47 +42,39 @@
 - **Docker** 20.10+ and **Docker Compose** 2.0+
 - **LLM API Key** (Qwen, OpenAI, or compatible)
 
-### One-Command Startup
+### Quick Startup
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourname/security-triage.git
-cd security-triage
+git clone https://github.com/chenchunrun/sentriq.git
+cd sentriq
 
 # Configure your LLM API key
 cp .env.docker.example .env
 # Edit .env and set LLM_API_KEY
 
-# Start the system (development mode - 8 core services)
-./start-dev.sh
-
-# Or start full production mode (all 15 services)
-./start-dev.sh prod
+# Start the current POC stack
+docker compose -f docker-compose.dev.yml up -d
 ```
 
 That's it! The system will:
-1. Pull and build Docker images
-2. Start all required services
-3. Run health checks
-4. Display access URLs
+1. Pull and build required images
+2. Start infrastructure and core services
+3. Expose the dashboard and service endpoints
 
 **Access the Dashboard**: http://localhost:3000
 
-### Frontend Without Host Node Changes
-
-If you want to work on the active frontend without changing the host Node version:
+To stop the stack:
 
 ```bash
-./scripts/frontend-dev.sh
+docker compose -f docker-compose.dev.yml down
 ```
 
-To verify the frontend build in a supported containerized runtime:
+To start the full compose graph instead:
 
 ```bash
-./scripts/frontend-build.sh
+docker compose up -d
 ```
-
-The active frontend lives in `services/web_dashboard/`.
 
 ---
 
@@ -113,11 +105,10 @@ security-triage/
 │   └── auth/                   # JWT authentication
 ├── docker-compose.yml           # Full production setup (15 services)
 ├── docker-compose.dev.yml       # Development setup (8 core services)
-├── start-dev.sh                 # Quick start script
 ├── src/                         # Prototype/CLI version
-├── docs/                        # Architecture documentation
+├── docs/                        # Minimal public docs index
 ├── tests/                       # Test suite
-└── standards/                   # Development standards
+└── services/web_dashboard/      # Active frontend
 ```
 
 ---
@@ -188,36 +179,7 @@ LLM_API_KEY=sk-your-deepseek-api-key
 LLM_BASE_URL=https://api.deepseek.com/v1
 ```
 
-See [LLM_API_CONFIG.md](docs/LLM_API_CONFIG.md) for detailed configuration.
-
----
-
-## 🏛️ Architecture
-
-### System Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         API Gateway (Kong)                          │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │
-                ┌───────────────┴───────────────┐
-                │                               │
-        ┌───────▼────────┐            ┌────────▼────────┐
-        │ Alert Ingestor │            │  Web Dashboard  │
-        └───────┬────────┘            └─────────────────┘
-                │
-        ┌───────▼────────┐
-        │   Normalizer   │
-        └───────┬────────┘
-                │
-        ┌───────▼─────────────────────┐
-        │     Context Collector        │
-        └───────┬─────────────────────┘
-                │
-        ┌───────▼─────────────────────┐
-        │ Threat Intel Aggregator      │
-        └───────┬─────────────────────┘
+Additional startup notes are in [CURRENT_STARTUP_GUIDE.md](/Users/newmba/security/CURRENT_STARTUP_GUIDE.md).
                 │
         ┌───────▼─────────────────────┐
         │      AI Triage Agent         │◄─────────┐
