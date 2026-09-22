@@ -75,9 +75,11 @@ class LayaDecisionProvider(DecisionModelProvider):
 
     name = "laya"
 
-    def __init__(self, runtime: Optional[str] = None, prewarm: bool = True) -> None:
+    def __init__(self, runtime: Optional[str] = None, prewarm: bool = True,
+                 checkpoint_override: Optional[str] = None) -> None:
         cfg = registry.providers.get("laya", {})
         self._cfg = cfg
+        self.checkpoint_override = checkpoint_override
         self.runtime = runtime or os.environ.get("LAYA_RUNTIME") or cfg.get("runtime", "mlx")
         self._router = SecurityLayaRouter(cfg)
         self._hf_repo = cfg.get("hf_repo", "convaiinnovations/laya")
@@ -116,10 +118,10 @@ class LayaDecisionProvider(DecisionModelProvider):
             with self._lock:
                 if checkpoint not in self._agents:
                     module = self._load_runtime()
-                    # security fine-tuned checkpoint overrides the typed model
+                    # security fine-tuned checkpoint overrides the base model
                     # (set LAYA_SECURITY_MODEL_PATH to a local fine-tune dir)
                     security_path = os.environ.get("LAYA_SECURITY_MODEL_PATH", "")
-                    if checkpoint == "typed" and security_path:
+                    if security_path and checkpoint in ("typed", "multilingual"):
                         self._agents[checkpoint] = module.load(security_path)
                     else:
                         subfolder = self._subfolders.get(checkpoint) or None
@@ -156,7 +158,10 @@ class LayaDecisionProvider(DecisionModelProvider):
         context: DecisionContext,
     ) -> DecisionResult:
         t0 = time.perf_counter()
-        checkpoint, routing_reason = self._router.select(context.state_text, context)
+        if self.checkpoint_override:
+            checkpoint, routing_reason = self.checkpoint_override, f"pinned:{self.checkpoint_override}"
+        else:
+            checkpoint, routing_reason = self._router.select(context.state_text, context)
         state_text = context.state_text
         # token budget guard (requirement §6.3): the compressor already keeps
         # state small; enforce a hard ceiling here as the last line of defense.

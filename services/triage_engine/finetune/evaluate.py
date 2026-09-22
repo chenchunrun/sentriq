@@ -121,9 +121,9 @@ async def routing_metrics(provider, cases, store):
 
 async def main_async(args):
     cases = [json.loads(line) for line in open(args.eval_data, encoding="utf-8")]
-    report = {"cases": len(cases), "decisions": len(cases) * 8}
+    report = {"cases": len(cases), "decisions": len(cases) * 8, "base_subfolder": args.base_subfolder}
 
-    base = load_agent("convaiinnovations/laya", subfolder="typed-decisions")
+    base = load_agent("convaiinnovations/laya", subfolder=args.base_subfolder)
     report["base"] = question_metrics(base, cases)
     del base
 
@@ -134,13 +134,14 @@ async def main_async(args):
     # routing layer: base provider vs fine-tuned provider
     from triage_engine.core.store import Store
 
+    checkpoint = args.checkpoint
     store = Store(":memory:")
-    base_provider = LayaDecisionProvider(prewarm=False)
-    base_provider._agents["typed"] = load_agent("convaiinnovations/laya", subfolder="typed-decisions")
+    base_provider = LayaDecisionProvider(prewarm=False, checkpoint_override=checkpoint)
+    base_provider._agents[checkpoint] = load_agent("convaiinnovations/laya", subfolder=args.base_subfolder)
     report["base"]["routing"] = await routing_metrics(base_provider, cases, store)
 
-    ft_provider = LayaDecisionProvider(prewarm=False)
-    ft_provider._agents["typed"] = load_agent(args.model)
+    ft_provider = LayaDecisionProvider(prewarm=False, checkpoint_override=checkpoint)
+    ft_provider._agents[checkpoint] = load_agent(args.model)
     report["fine_tuned"]["routing"] = await routing_metrics(ft_provider, cases, store)
 
     out = Path(args.out)
@@ -154,6 +155,10 @@ if __name__ == "__main__":
     parser.add_argument("--model", default=str(Path(__file__).resolve().parents[1] / "models" / "laya-security-v1"))
     parser.add_argument("--eval-data", default=str(Path(__file__).parent / "data" / "eval.jsonl"))
     parser.add_argument("--out", default="data/reports/laya_security_finetune_eval.json")
+    parser.add_argument("--base-subfolder", default="typed-decisions",
+                        help="base checkpoint to compare against (typed-decisions | multilingual)")
+    parser.add_argument("--checkpoint", default="typed", choices=["typed", "multilingual"],
+                        help="which checkpoint slot the fine-tuned model serves")
     args = parser.parse_args()
     import asyncio
 
