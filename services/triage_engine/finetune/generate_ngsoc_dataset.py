@@ -45,6 +45,53 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 NGSOC_DIR = Path.home() / "Downloads" / "NGSOC狩猎"
 
+
+class HunterContext:
+    """Observable context from the hunter platform: ATT&CK mapping, whitelist
+    taxonomy, and per-host compromise status from a run BEFORE the eval day
+    (yesterday's host risk informing today's triage - exactly the Context
+    Enrichment layer the architecture mandates)."""
+
+    def __init__(self, ngsoc_dir: Path, out_dir: Path):
+        import yaml
+
+        with open(ngsoc_dir / "config" / "attck_map.yaml", encoding="utf-8") as fh:
+            attck = yaml.safe_load(fh) or {}
+        self.attck_exact = attck.get("exact", {}) or {}
+        self.attck_patterns = attck.get("patterns", []) or []
+
+        with open(ngsoc_dir / "config" / "whitelist.yaml", encoding="utf-8") as fh:
+            wl = yaml.safe_load(fh) or {}
+        self.wl_dns, self.wl_names = set(), {}
+        for rule in wl.get("rules", []) or []:
+            if not rule.get("default_on", True):
+                continue
+            if rule.get("type") == "dst_ip":
+                self.wl_dns.update(rule.get("values") or ([rule["value"]] if rule.get("value") else []))
+            elif rule.get("type") == "alert_name" and rule.get("value"):
+                self.wl_names[str(rule["value"])] = str(rule.get("reason", ""))[:40]
+
+        with open(out_dir / "data" / "compromise_on.json", encoding="utf-8") as fh:
+            comp = json.load(fh)
+        self.hosts = {h["host"]: h for h in comp.get("hosts", []) if isinstance(h, dict) and h.get("host")}
+
+    def map_alert(self, name: str) -> dict:
+        if name in self.attck_exact:
+            return self.attck_exact[name]
+        for p in self.attck_patterns:
+            try:
+                if re.search(str(p.get("pattern", "")), name):
+                    return p
+            except re.error:
+                continue
+        return {}
+
+    def host_risk(self, ip) -> str:
+        host = self.hosts.get(str(ip or ""))
+        if not host:
+            return ""
+        return f"{host.get('level', '?')}({host.get('score', '?')})"
+
 # ------------------------------------------------------------------ taxonomy
 _SEVERITY_BY_CATEGORY = {
     "远控木马": "critical", "后门程序": "critical", "僵尸网络": "critical",
@@ -168,7 +215,7 @@ def ip_scope(ip: str) -> str:
     return "公网"
 
 
-def render_state(alert, alert_id):
+def render_state(alert, alert_id, hunter=None):
     """Chinese state in CompressedState text format - NO triageResult (the label)."""
     def first(v):
         if isinstance(v, list):
@@ -180,17 +227,34 @@ def render_state(alert, alert_id):
     iocs = alert.get("ioc") if isinstance(alert.get("ioc"), list) else ([ioc] if ioc else [])
     ioc_hit = any(i and (i == domain or i in (src, dst) or first(alert.get("httpHost")) in i) for i in iocs)
     direction = first(alert.get("commDirection")) or "未知"
-    ts = str(alert.get("latestTimestamp") or "")
-    hour = ts[11:13] if len(ts) >= 13 else ""   # hour-of-day only; no dates in state
+    name = _clip(alert.get("name"))
     lines = [
         # NOTE: no alert_id / date in the state - day identifiers would let the
         # model memorize export batches instead of alert semantics
         f"type: {alert.get('ruleCategoryName') or '未分类'}",
-        f"name: {_clip(alert.get('name'))}",
+        f"name: {name}",
         f"severity: {_severity(alert.get('ruleCategoryName'))}",
         f"attack_result: {alert.get('attackResult') or '未知'}",
         f"communication_direction: {direction}",
     ]
+    if hunter is not None:
+        mapping = hunter.map_alert(str(alert.get("name") or ""))
+        if mapping.get("threat_class"):
+            lines.append(f"threat_class: {mapping['threat_class']}")
+        if mapping.get("stage"):
+            lines.append(f"attack_stage: {mapping['stage']}")
+        if mapping.get("technique"):
+            lines.append(f"technique: {mapping['technique']}")
+        if mapping.get("benign_tool"):
+            lines.append("benign_tool_hint: true")
+        for token, reason in hunter.wl_names.items():
+            if token and token in str(alert.get("name") or ""):
+                lines.append(f"whitelist_match: {_clip(reason, 50)}")
+                break
+        if dst in hunter.wl_dns:
+            lines.append("whitelist_match: 公共DNS")
+    ts = str(alert.get("latestTimestamp") or "")
+    hour = ts[11:13] if len(ts) >= 13 else ""   # hour-of-day only; no dates in state
     if hour:
         lines.append(f"hour_of_day: {hour}")
     if src:
@@ -203,6 +267,11 @@ def render_state(alert, alert_id):
             lines.append(f"destination_scope: {scope}")
     if first(alert.get("devName")):
         lines.append(f"device: {_clip(first(alert.get('devName')), 60)}")
+    if hunter is not None:
+        for role, ip in (("src", src), ("dst", dst)):
+            risk = hunter.host_risk(ip)
+            if risk:
+                lines.append(f"{role}_host_prior: {risk}")
     if domain:
         lines.append(f"domain: {_clip(domain, 80)}")
     lines.append(f"ioc_hit: {str(bool(ioc_hit and iocs)).lower()}")
@@ -281,7 +350,7 @@ def _gold_probabilities(spec, value):
     return {"probabilities": {o: (0.8 if o == value else rest) for o in options}}
 
 
-def build_cases(sampled, questions, rng, prefix):
+def build_cases(sampled, questions, rng, prefix, hunter=None):
     cases, seen = [], set()
     for i, (day, alert) in enumerate(sampled):
         gold = gold_for(alert, rng)
@@ -296,7 +365,7 @@ def build_cases(sampled, questions, rng, prefix):
         cases.append({
             "id": f"{prefix}-{i:05d}",
             "workflow": f"ngsoc_triage/{alert.get('ruleCategoryName')}",
-            "state": json.dumps(render_state(alert, alert_id), ensure_ascii=False),
+            "state": json.dumps(render_state(alert, alert_id, hunter=hunter), ensure_ascii=False),
             "questions": json.dumps(questions, ensure_ascii=False),
             "gold": json.dumps({qid: _gold_probabilities(spec, gold[qid])
                                 for qid, spec in questions.items()}, ensure_ascii=False),
@@ -308,6 +377,8 @@ def build_cases(sampled, questions, rng, prefix):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ngsoc-dir", default=str(NGSOC_DIR))
+    parser.add_argument("--hunter-out", default=None,
+                        help="hunter output dir for host-risk context (default: latest run before the eval day)")
     parser.add_argument("--train-days", nargs="*", default=[f"2026090{d}" for d in range(1, 10)] + ["20260910", "20260911", "20260912", "20260914"])
     parser.add_argument("--eval-days", nargs="*", default=["20260913"])
     parser.add_argument("--out", default=str(Path(__file__).parent / "data"))
@@ -325,11 +396,21 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    hunter_out = args.hunter_out
+    if hunter_out is None:
+        # latest hunter run strictly before the first eval day = prior knowledge only
+        eval_day = min(args.eval_days) if args.eval_days else "99999999"
+        runs = sorted(p.name for p in (Path(args.ngsoc_dir) / "output").glob("2026*"))
+        prior = [r for r in runs if r[:8] < eval_day] or runs
+        hunter_out = str(Path(args.ngsoc_dir) / "output" / prior[-1])
+    hunter = HunterContext(Path(args.ngsoc_dir), Path(hunter_out))
+    print(f"hunter context: {hunter_out} ({len(hunter.hosts)} hosts with prior risk)")
+
     train = build_cases(sample_days(args.ngsoc_dir, args.train_days, _TRAIN_QUOTA, rng),
-                        questions, rng, "NTR")
+                        questions, rng, "NTR", hunter=hunter)
     eval_quota = {k: max(4, v // 6) for k, v in _TRAIN_QUOTA.items()}
     evals = build_cases(sample_days(args.ngsoc_dir, args.eval_days, eval_quota, rng),
-                        questions, rng, "NEV")
+                        questions, rng, "NEV", hunter=hunter)
 
     for split, cases in (("train", train), ("eval", evals)):
         path = out / f"ngsoc_{split}.jsonl"
