@@ -67,6 +67,29 @@ tests/                  42 个单元/接口测试（不依赖权重与网络）
 PYTHONPATH=services venv/bin/python -m pytest services/triage_engine/tests -q
 ```
 
+## 安全语料微调（Laya Security Fine-tune）
+
+Base checkpoint zero-shot 接近随机（上游自述），安全 8 问题必须微调后才能支撑生产阈值。仓库提供完整微调管线（`finetune/`，基于官方 RLCD notebook 的单卡 Apple Silicon 改造）：
+
+```bash
+# 1. 生成安全语料（14 类场景 × 软标签，状态文本走真实 compressor 保证分布一致；种子可复现）
+PYTHONPATH=services venv/bin/python services/triage_engine/finetune/generate_dataset.py
+#    -> finetune/data/{train,eval}.jsonl（默认 700/160 条；含 gold 路由，且 gold 遵守硬门策略）
+
+# 2. 微调（MPS 单卡，~17 分钟；算法同官方：GRPO 噪声探索 + proper scoring reward + CE 引导 + 温度校准）
+PYTHONPATH=services venv/bin/python services/triage_engine/finetune/train.py \
+    --output-dir services/triage_engine/models/laya-security-v1
+
+# 3. 基线 vs 微调评测（决策质量指标 + 引擎路由指标）
+PYTHONPATH=services venv/bin/python services/triage_engine/finetune/evaluate.py
+#    -> data/reports/laya_security_finetune_eval.json
+
+# 4. 生产切换（无需改代码）
+export LAYA_SECURITY_MODEL_PATH=$PWD/services/triage_engine/models/laya-security-v1
+```
+
+依赖：`laya>=0.3`（torch 运行时，仅训练需要；推理仍走 laya-mlx）。微调产物（`finetune/data/`、`models/`）已 gitignore，本地保留；大规模正式训练建议按官方 notebook 跑 2×T4/GPU。
+
 ## 依赖说明
 
 - `laya-mlx` 已装入仓库 venv（Apple Silicon 7–14ms/问）；它把 `tokenizers` 升到 0.23.2，与 chromadb 0.5.23 的 `<=0.20.3` 约束冲突（当前实测 import 共存无问题，若 similarity_search 受影响需单独 venv 隔离）。

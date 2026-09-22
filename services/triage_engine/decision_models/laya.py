@@ -116,8 +116,14 @@ class LayaDecisionProvider(DecisionModelProvider):
             with self._lock:
                 if checkpoint not in self._agents:
                     module = self._load_runtime()
-                    subfolder = self._subfolders.get(checkpoint) or None
-                    self._agents[checkpoint] = module.load(self._hf_repo, subfolder=subfolder)
+                    # security fine-tuned checkpoint overrides the typed model
+                    # (set LAYA_SECURITY_MODEL_PATH to a local fine-tune dir)
+                    security_path = os.environ.get("LAYA_SECURITY_MODEL_PATH", "")
+                    if checkpoint == "typed" and security_path:
+                        self._agents[checkpoint] = module.load(security_path)
+                    else:
+                        subfolder = self._subfolders.get(checkpoint) or None
+                        self._agents[checkpoint] = module.load(self._hf_repo, subfolder=subfolder)
         return self._agents[checkpoint]
 
     @property
@@ -212,7 +218,9 @@ class LayaDecisionProvider(DecisionModelProvider):
                 if "noul" in value:
                     decisions[name] = float(value["noul"])
                 elif "score" in value:
-                    decisions[name] = float(value["score"])
+                    # laya returns a continuous expectation over levels; the
+                    # registry semantics (and router thresholds) are level-based
+                    decisions[name] = float(round(value["score"]))
                 elif "choice" in value:
                     decisions[name] = str(value["choice"])
                 if name == "route" and isinstance(value.get("probabilities"), dict):
