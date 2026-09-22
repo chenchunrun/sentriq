@@ -1,0 +1,173 @@
+# AI Security Triage Engine - Decision Registry + Threshold Registry + Policy
+#
+# All decision questions, thresholds, budgets and policy whitelists live here.
+# Code must not hardcode thresholds (requirement §32).
+#
+# Question specs follow the laya typed-question format:
+#   noul   -> {"type": "noul", "instructions": str}                  -> P(true)
+#   score  -> {"type": "score", "instructions": str, "criteria": [..]} -> level 0..4
+#   choice -> {"type": "choice", "instructions": str, "criteria": {..}} -> option + distribution
+
+decision_registry:
+  version: security_triage_v1
+  description: Fixed set of 8 fast decision questions for System 1 (requirement §8)
+  questions:
+    malicious:
+      type: noul
+      description: P(alert is caused by malicious activity)
+      instructions: "Based on the available security evidence, is this alert likely caused by malicious activity?"
+    authorized:
+      type: noul
+      description: P(behavior is authorized operation / change / scan / ops activity)
+      instructions: "Is this behavior likely an authorized operation, approved change, vulnerability scan, or routine ops activity?"
+    evidence_strength:
+      type: score
+      scale: [0, 4]
+      description: 0=almost none 1=weak 2=moderate 3=strong 4=conclusive
+      instructions: "Rate the strength of the security evidence available in this alert."
+      criteria:
+        - "almost no usable evidence"
+        - "weak or indirect evidence"
+        - "moderate evidence from a single source"
+        - "strong corroborated evidence"
+        - "conclusive direct evidence"
+    novelty:
+      type: score
+      scale: [0, 4]
+      description: 0=known repeated pattern 1=common 2=uncommon 3=novel 4=highly anomalous
+      instructions: "How novel or anomalous is this behavior pattern compared to routine activity on this asset?"
+      criteria:
+        - "known repeated pattern seen many times"
+        - "common pattern, seen regularly"
+        - "relatively uncommon pattern"
+        - "novel behavior, not seen before"
+        - "highly anomalous behavior"
+    business_impact:
+      type: score
+      scale: [0, 4]
+      description: 0=negligible 1=low 2=medium 3=high 4=critical (driven by asset/identity context, not AI alone)
+      instructions: "How severe is the potential business impact if this activity is malicious?"
+      criteria:
+        - "negligible impact"
+        - "low impact"
+        - "medium impact"
+        - "high impact on important systems"
+        - "critical impact on core business systems"
+    containment_state:
+      type: choice
+      choices: [NOT_CONTAINED, PARTIALLY_CONTAINED, CONTAINED, UNKNOWN]
+      description: current containment state of the observed activity
+      instructions: "What is the current containment state of this activity?"
+      criteria:
+        NOT_CONTAINED: "activity not blocked, still running"
+        PARTIALLY_CONTAINED: "partially blocked or isolated"
+        CONTAINED: "fully blocked or quarantined"
+        UNKNOWN: "containment state unknown"
+    investigation_need:
+      type: noul
+      description: P(alert requires deep investigation)
+      instructions: "Does this alert require deep multi-source investigation rather than routine handling?"
+    route:
+      type: choice
+      choices: [FAST_CLOSE, FAST_QUEUE, DEEP_INVESTIGATE, URGENT_ESCALATE, HUMAN_REVIEW]
+      description: model-suggested route; advisory input to the Router only, never the final route (requirement §8.8)
+      instructions: "Which handling route does this alert deserve?"
+      criteria:
+        FAST_CLOSE: "known false positive or authorized activity, safe to auto-close"
+        FAST_QUEUE: "confirmed malicious but contained, queue for low-priority handling"
+        DEEP_INVESTIGATE: "complex or uncertain, needs deep investigation"
+        URGENT_ESCALATE: "critical active attack, urgent escalation"
+        HUMAN_REVIEW: "unclear or conflicting, needs human judgement"
+
+thresholds:
+  version: triage_policy_v1
+  fast_close:
+    malicious_max: 0.10
+    authorized_min: 0.95
+    impact_max: 1
+    evidence_strength_min: 2
+    novelty_max: 1
+    require_similar_history: true
+    similar_history_min: 1
+  fast_queue:
+    malicious_min: 0.70
+    contained_only: true
+    impact_max: 2
+  deep_investigate:
+    uncertainty_min: 0.25          # 1 - max(malicious, authorized)
+    investigation_need_min: 0.60
+    novelty_min: 2
+    evidence_strength_max: 1
+  urgent:
+    malicious_min: 0.90
+    impact_min: 3
+  human_review:
+    degraded_provider: true
+  ensemble:
+    disagreement_gap: 0.40         # |p1 - p2| between providers on `malicious`
+
+hard_gates:
+  # Any hit forbids FAST_CLOSE (requirement §12)
+  asset_critical: asset.criticality == critical
+  privileged_identity: identity.privileged == true
+  credential_access: flags.credential_access == true
+  lateral_movement: flags.lateral_movement == true
+  multiple_hosts: flags.multiple_hosts == true
+  active_attack: flags.active_attack == true
+  data_exfiltration: flags.data_exfiltration == true
+  ransomware: flags.ransomware == true
+  evidence_conflict: flags.evidence_conflict == true
+
+slow_path:
+  budgets:
+    max_steps: 12
+    max_tool_calls: 8
+    max_time_seconds: 300
+    max_tokens: 60000
+    max_cost_usd: 1.0
+  stop:
+    hypothesis_converged: 0.85     # top hypothesis posterior at/above this = converged
+    min_verdict_confidence: 0.70   # below this the judge must return UNCLEAR -> human
+    insufficient_progress_rounds: 2
+
+policy:
+  version: soc_policy_v1
+  # V1 automation boundary (requirement §26)
+  auto_allowed_actions:
+    - close_false_positive
+    - reprioritize_alert
+    - create_case
+    - add_tags
+    - correlate_alerts
+    - trigger_investigation
+    - notify_soc
+  approval_required_actions:
+    - disable_account
+    - isolate_host
+    - kill_process
+    - block_ip
+    - firewall_change
+    - delete_file
+    - stop_service
+
+providers:
+  default: laya
+  laya:
+    runtime: mlx                    # mlx (Apple Silicon) | torch (GPU/CPU servers)
+    hf_repo: convaiinnovations/laya # one HF repo, checkpoints selected by subfolder
+    subfolders:
+      multilingual: multilingual
+      typed: typed-decisions
+      general: null                 # root of the repo = english checkpoint
+    cjk_ratio_for_multilingual: 0.15
+    timeout_seconds: 10
+    max_retries: 1
+    max_state_tokens: 800
+  fallback: rule                    # when the primary provider fails -> fail safe, never auto-close
+
+replay:
+  max_alerts_per_run: 1000
+
+observability:
+  store_decisions: true
+  store_slow_path: true
