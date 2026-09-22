@@ -1,16 +1,15 @@
 # Sentriq
 
-AI-powered security alert triage prototype.
+AI-powered security alert triage system.
 
-## Public Scope
+## What's in This Repository
 
-This public repository now focuses on:
+Two implemented codebases:
 
-- the prototype CLI under `src/`
-- the current service source under `services/`
-- the active frontend source under `services/web_dashboard/`
+- **Prototype CLI** (`src/` + `main.py`) — single-node LangChain agent that collects context, queries threat intel (mocked), scores risk, and generates remediation for security alerts.
+- **Microservices source** (`services/`) — the full platform: FastAPI services connected by RabbitMQ (ingestion, normalization, context/threat-intel enrichment, LLM routing, AI triage, similarity search, attack-chain analysis, workflow/automation, notifications, reporting, API gateway), a shared library (`services/shared/`), and a React dashboard (`services/web_dashboard/`).
 
-Historical design docs, deployment assets, helper scripts, and process reports are kept local only.
+Historical design docs, deployment assets (docker-compose, k8s/helm), the root-level test suites, helper scripts, and process reports are kept local and are not part of this public repository.
 
 ## Quick Start
 
@@ -40,5 +39,6 @@ python main.py --file data/sample_alerts.json
 - `QUICKSTART.md`
 - `CURRENT_STARTUP_GUIDE.md`
 - `INSTALL_GUIDE.md`
+- `CLAUDE.md`
 - `docs/README.md`
 - `services/web_dashboard/README.md`
