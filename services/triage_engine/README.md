@@ -90,6 +90,8 @@ export LAYA_SECURITY_MODEL_PATH=$PWD/services/triage_engine/models/laya-security
 
 依赖：`laya>=0.3`（torch 运行时，仅训练需要；推理仍走 laya-mlx）。微调产物（`finetune/data/`、`models/`）已 gitignore，本地保留；大规模正式训练建议按官方 notebook 跑 2×T4/GPU。
 
+**实测结论（NGSOC 真实数据）**：聚焦采样（`--quota-scale 0.333`，攻击成功日为主，~500 案例）优于全量放大（21 天 1730 案例：choice 0.91 vs 0.78）——混合导出日里"需人工研判"（gold 恶意 0.5）占半数，灰区标签稀释判别信号。全量变体存档于 `models/laya-security-ngsoc-v5-full`。
+
 ## 依赖说明
 
 - `laya-mlx` 已装入仓库 venv（Apple Silicon 7–14ms/问）；它把 `tokenizers` 升到 0.23.2，与 chromadb 0.5.23 的 `<=0.20.3` 约束冲突（当前实测 import 共存无问题，若 similarity_search 受影响需单独 venv 隔离）。

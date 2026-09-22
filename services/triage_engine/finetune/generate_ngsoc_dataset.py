@@ -310,12 +310,12 @@ def to_raw_alert(alert, alert_id):
     }
 
 
-# balanced sample sizes per triage class (train)
+# balanced sample sizes per triage class (train) - full-data round: ~3x
 _TRAIN_QUOTA = {
-    "有效告警:攻击成功": 160, "有效告警:攻击失败": 140, "有效告警:结果未知": 120,
-    "隐患:异常行为": 110, "隐患:脆弱性": 40,
-    "无效告警:业务触发": 60, "无效告警:数据缺失": 40, "无效告警:其他": 25,
-    "无效告警:规则误报": 8, "需人工研判": 60,
+    "有效告警:攻击成功": 480, "有效告警:攻击失败": 420, "有效告警:结果未知": 360,
+    "隐患:异常行为": 330, "隐患:脆弱性": 120,
+    "无效告警:业务触发": 180, "无效告警:数据缺失": 120, "无效告警:其他": 75,
+    "无效告警:规则误报": 24, "需人工研判": 180,
 }
 
 
@@ -377,9 +377,11 @@ def build_cases(sampled, questions, rng, prefix, hunter=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ngsoc-dir", default=str(NGSOC_DIR))
+    parser.add_argument("--quota-scale", type=float, default=1.0,
+                        help="scale the per-class train quotas (e.g. 0.333 -> the original focused set)")
     parser.add_argument("--hunter-out", default=None,
                         help="hunter output dir for host-risk context (default: latest run before the eval day)")
-    parser.add_argument("--train-days", nargs="*", default=[f"2026090{d}" for d in range(1, 10)] + ["20260910", "20260911", "20260912", "20260914"])
+    parser.add_argument("--train-days", nargs="*", default=[f"2026090{d}" for d in range(1, 10)] + [f"2026091{d}" for d in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + ["20260920", "20260921"])
     parser.add_argument("--eval-days", nargs="*", default=["20260913"])
     parser.add_argument("--out", default=str(Path(__file__).parent / "data"))
     parser.add_argument("--seed", type=int, default=7)
@@ -406,7 +408,8 @@ def main():
     hunter = HunterContext(Path(args.ngsoc_dir), Path(hunter_out))
     print(f"hunter context: {hunter_out} ({len(hunter.hosts)} hosts with prior risk)")
 
-    train = build_cases(sample_days(args.ngsoc_dir, args.train_days, _TRAIN_QUOTA, rng),
+    quota = {k: max(1, int(v * args.quota_scale)) for k, v in _TRAIN_QUOTA.items()}
+    train = build_cases(sample_days(args.ngsoc_dir, args.train_days, quota, rng),
                         questions, rng, "NTR", hunter=hunter)
     eval_quota = {k: max(4, v // 6) for k, v in _TRAIN_QUOTA.items()}
     evals = build_cases(sample_days(args.ngsoc_dir, args.eval_days, eval_quota, rng),
