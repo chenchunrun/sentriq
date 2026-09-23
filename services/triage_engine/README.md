@@ -90,7 +90,7 @@ export LAYA_SECURITY_MODEL_PATH=$PWD/services/triage_engine/models/laya-security
 
 依赖：`laya>=0.3`（torch 运行时，仅训练需要；推理仍走 laya-mlx）。微调产物（`finetune/data/`、`models/`）已 gitignore，本地保留；大规模正式训练建议按官方 notebook 跑 2×T4/GPU。
 
-**实测结论（NGSOC 真实数据）**：聚焦采样（`--quota-scale 0.333`，攻击成功日为主，~500 案例）优于全量放大（21 天 1730 案例：choice 0.91 vs 0.78）——混合导出日里"需人工研判"（gold 恶意 0.5）占半数，灰区标签稀释判别信号。全量变体存档于 `models/laya-security-ngsoc-v5-full`。
+**实测结论（NGSOC 真实数据）**：聚焦采样（`--quota-scale 0.333`，攻击成功日为主，~450 案例）优于全量放大（21 天 1730 案例：choice 0.91 vs 0.78）；"需人工研判"类已按 SOC 口径从训练/评测中剔除（该标签是 SOC 自己的保守占位，实际均为异常告警，0.5 的 gold 只会教出犹豫）。当前正式模型：choice 0.919 / score MAE 0.17 / noul Brier 0.029。历史变体存档于 `models/laya-security-ngsoc-v4-keep`、`models/laya-security-ngsoc-v5-full`。
 
 ## 依赖说明
 
