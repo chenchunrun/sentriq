@@ -56,9 +56,6 @@ async def replay(
 
     results: List[Dict[str, Any]] = []
     latencies: List[float] = []
-    route_counts: Dict[str, int] = {}
-    fast_close_tp = fast_close_fp = false_close = 0
-    malicious_total = malicious_caught = 0
 
     for alert in alerts:
         t0 = time.perf_counter()
@@ -68,13 +65,53 @@ async def replay(
         )
         elapsed = (time.perf_counter() - t0) * 1000
         latencies.append(elapsed)
-        route = outcome["route"]
-        route_counts[route] = route_counts.get(route, 0) + 1
 
         alert_id = outcome["alert_id"]
         truth = labels.get(alert_id) or labels.get(str(alert.get("alert_id")))
-        malicious = outcome["decision"]["decisions"].get("malicious", 0.0)
 
+        results.append({
+            "alert_id": alert_id,
+            "route": outcome["route"],
+            "reason_codes": outcome["reason_codes"],
+            "hard_gates": outcome["hard_gates"],
+            "malicious": outcome["decision"]["decisions"].get("malicious", 0.0),
+            "decisions": outcome["decision"]["decisions"],
+            "model_suggested_route": outcome["model_suggested_route"],
+            "state_hash": outcome["decision"].get("state_hash", ""),
+            "truth": truth,
+            "latency_ms": round(elapsed, 1),
+            "degraded": outcome["decision"].get("degraded", False),
+        })
+
+    run = {
+        "provider": (provider.name if provider else get_provider().name),
+        "threshold_version": registry.threshold_version,
+        "question_version": registry.question_version,
+        "alert_count": len(results),
+        "metrics": metrics_from_results(results, latencies),
+        "results": results,
+    }
+    if store is not None:
+        store.save_replay_run(run)
+    return run
+
+
+def metrics_from_results(results: List[Dict[str, Any]],
+                         latencies: Optional[List[float]] = None) -> Dict[str, Any]:
+    """Fast-path metrics (§37) recomputed from replay result rows.
+
+    Pure arithmetic over rows - the label correction step of the SOC
+    adjudication loop reuses this on rows whose ``truth`` was flipped by
+    an adjudication, without re-running the model.
+    """
+    latencies = latencies if latencies is not None else [r["latency_ms"] for r in results]
+    route_counts: Dict[str, int] = {}
+    fast_close_tp = fast_close_fp = false_close = 0
+    malicious_total = malicious_caught = 0
+    for row in results:
+        route, truth = row["route"], row.get("truth")
+        route_counts[route] = route_counts.get(route, 0) + 1
+        malicious = row.get("malicious", 0.0)
         if truth == "malicious":
             malicious_total += 1
             if malicious >= 0.5 or route in ("DEEP_INVESTIGATE", "URGENT_ESCALATE"):
@@ -86,19 +123,9 @@ async def replay(
             elif truth == "benign":
                 fast_close_tp += 1
 
-        results.append({
-            "alert_id": alert_id,
-            "route": route,
-            "reason_codes": outcome["reason_codes"],
-            "malicious": malicious,
-            "truth": truth,
-            "latency_ms": round(elapsed, 1),
-            "degraded": outcome["decision"].get("degraded", False),
-        })
-
     total = len(results) or 1
     fast_path_count = route_counts.get("FAST_CLOSE", 0) + route_counts.get("FAST_QUEUE", 0)
-    metrics = {
+    return {
         "total": len(results),
         "route_distribution": route_counts,
         "fast_path_coverage": round(fast_path_count / total, 4),
@@ -108,18 +135,6 @@ async def replay(
         "p95_latency_ms": round(_percentile(latencies, 95), 1),
         "avg_latency_ms": round(sum(latencies) / total, 1),
         "cost_per_alert_usd": 0.0,  # local laya inference has no marginal API cost
-        "labeled": len(labels),
-        "degraded_decisions": sum(1 for r in results if r["degraded"]),
+        "labeled": sum(1 for r in results if r.get("truth") in ("benign", "malicious")),
+        "degraded_decisions": sum(1 for r in results if r.get("degraded")),
     }
-
-    run = {
-        "provider": (provider.name if provider else get_provider().name),
-        "threshold_version": registry.threshold_version,
-        "question_version": registry.question_version,
-        "alert_count": len(results),
-        "metrics": metrics,
-        "results": results,
-    }
-    if store is not None:
-        store.save_replay_run(run)
-    return run

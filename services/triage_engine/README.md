@@ -46,6 +46,8 @@ TRIAGE_ENGINE_PROVIDER / TRIAGE_ENGINE_CONFIG / TRIAGE_ENGINE_DB
 | GET | `/api/v1/investigations/{id}`、`/api/v1/cases/{id}` | 案例/调查详情 |
 | POST | `/api/v1/replay` | 批量回放 + Shadow 评估（≤1000 条，含 False Close Rate 等指标） |
 | POST | `/api/v1/feedback` | 人工反馈（agree/override/…，用于阈值与校准优化） |
+| POST | `/api/v1/adjudications` | 批量导入 SOC 族裁决（upsert + 逐成员 feedback 联动） |
+| GET | `/api/v1/adjudications`、`/adjudications/{family_id}` | 族裁决列表（含 stats）/ 详情 |
 | POST | `/api/v1/policy/evaluate` | 动作策略判定 |
 | GET | `/health` | 健康检查（provider/LLM 可用性、版本号） |
 
@@ -57,8 +59,8 @@ core/                   context / compressor / gate / router / policy / evidence
 decision_models/        base(Provider 抽象) / laya(原生 mlx|torch) / rule(确定性+回退) / jev(预留) / ensemble(分歧检测)
 fast_path/              快路径编排
 slow_path/              state / planner / evaluator / judge / investigator / tool_gateway / 13 个只读工具
-evaluation/             replay + shadow
-tests/                  42 个单元/接口测试（不依赖权重与网络）
+evaluation/             replay + shadow + families(告警族) + worksheet(研判工作表)
+tests/                  89 个单元/接口测试（不依赖权重与网络）
 ```
 
 ## 测试
@@ -91,6 +93,47 @@ export LAYA_SECURITY_MODEL_PATH=$PWD/services/triage_engine/models/laya-security
 依赖：`laya>=0.3`（torch 运行时，仅训练需要；推理仍走 laya-mlx）。微调产物（`finetune/data/`、`models/`）已 gitignore，本地保留；大规模正式训练建议按官方 notebook 跑 2×T4/GPU。
 
 **实测结论（NGSOC 真实数据）**：聚焦采样（`--quota-scale 0.333`，攻击成功日为主，~450 案例）优于全量放大（21 天 1730 案例：choice 0.91 vs 0.78）；"需人工研判"类已按 SOC 口径从训练/评测中剔除（该标签是 SOC 自己的保守占位，实际均为异常告警，0.5 的 gold 只会教出犹豫）。当前正式模型：choice 0.919 / score MAE 0.17 / noul Brier 0.029。历史变体存档于 `models/laya-security-ngsoc-v4-keep`、`models/laya-security-ngsoc-v5-full`。
+
+## SOC 反馈回流（Adjudication Loop）
+
+Shadow 日校准（e8b3a28）后 FAST_CLOSE 仍锁 shadow-only：残余误关全部来自同一"相反标签孪生"族（Tailscale-CGNAT 命令注入：0921 标"攻击成功"、其他日标"无效告警"），需 SOC 研判裁定。本工具链闭环 `影子回放 → 工作表导出 → SOC 填写 → 批量导入 → 族处置跟踪 → 自动重校准报告`：
+
+```
+shadow_replay.py --day D
+  ├─ data/reports/ngsoc_shadow_D.json            聚合报告（形状不变）
+  └─ data/reports/ngsoc_shadow_D_rows.jsonl      逐条行（原生身份 + raw_alert 自洽可重扫 + 族键 + 溯源）
+export_worksheet.py → soc_worksheet_D.csv        （孪生族置顶；row_checksum 防篡改）
+(SOC 填 soc_verdict / soc_disposition / apply_to_family / adjudicator / notes)
+import_worksheet.py → adjudications 表(upsert) + 逐成员 soc_adjudication feedback + 导入回执 JSON
+recalibrate.py → recalibration_D.json
+  标签修正 → 前后指标 → 转正判定(READY/HOLD+blockers) → 阈值重扫 → engine.yaml 建议片段(仅字符串)
+```
+
+**枚举**：`soc_verdict = 有效告警 | 无效告警 | 需复查`（无效→benign、有效→malicious、需复查→不改标签）；`soc_disposition = auto_close_ok | suppress | blocklist | monitor | relabel`。
+
+**族键**：`(name, sorted(src ip_scope 集), sorted(dst ip_scope 集), domain)`，`family_id = "F-" + sha256(json)[:8]` 跨日稳定。作用域集（而非原始 IP）使 Tailscale 孪生合并为一族——CGNAT 源 IP（100.64/10）逐条变化，原始 IP 键会碎片化。同键跨日出现相反真值即标记 **twin family**，是转正判定的硬阻塞项（SOC 看成员清单后决定 `apply_to_family`；接受过合并优于漏孪生）。
+
+```bash
+# 1. 导出（孪生族优先排序，打印孪生摘要）
+PYTHONPATH=services venv/bin/python services/triage_engine/finetune/export_worksheet.py \
+    --rows data/reports/ngsoc_shadow_20260921_rows.jsonl --out data/reports/soc_worksheet_20260921.csv
+
+# 2. 导入（--db 直写 / --api 走运行中的服务；回执 = recalibrate 输入）
+PYTHONPATH=services venv/bin/python services/triage_engine/finetune/import_worksheet.py \
+    --worksheet data/reports/soc_worksheet_20260921.csv \
+    --rows data/reports/ngsoc_shadow_20260921_rows.jsonl --db services/triage_engine/data/triage_engine.db
+
+# 3. 族处置跟踪视图
+PYTHONPATH=services venv/bin/python services/triage_engine/finetune/adjudication_status.py \
+    --db services/triage_engine/data/triage_engine.db --rows data/reports/ngsoc_shadow_20260921_rows.jsonl
+
+# 4. 重校准报告（--provider rule 无权重跑通；正式扫描用 --models services/triage_engine/models/laya-security-ngsoc-v1）
+PYTHONPATH=services venv/bin/python services/triage_engine/finetune/recalibrate.py \
+    --rows data/reports/ngsoc_shadow_20260921_rows.jsonl \
+    --adjudications data/reports/adjudications_<ts>.json --provider rule --grid tiny
+```
+
+**转正判定（READY）需同时满足**：修正后误关率 0 + 孪生族全部裁决（≠需复查）+ FAST_CLOSE 行全族覆盖 +（若扫描）最优安全组合覆盖率不降，否则 HOLD 并列出 blockers。**recalibrate 只出建议：engine.yaml 是单一事实来源，只由人工修改**；抑制/封禁候选亦仅入报告（blocklist 本就是 approval_required 动作）。服务端部署用 `--api` 导入（服务独占 DB）；CLI 直写仅限本机离线场景（busy_timeout 兜底短事务）。
 
 ## 依赖说明
 

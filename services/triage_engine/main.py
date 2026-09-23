@@ -27,6 +27,8 @@ and slow path (Investigation Agent) behind a small REST surface
     GET  /api/v1/cases
     POST /api/v1/replay                     batch replay / shadow evaluation
     POST /api/v1/feedback                   human feedback (§35)
+    POST /api/v1/adjudications              batch SOC family adjudications
+    GET  /api/v1/adjudications[/{family_id}]
     GET  /health
 """
 
@@ -53,6 +55,7 @@ from triage_engine.core.store import get_store
 from triage_engine.decision_models import decide_with_fallback, get_provider
 from triage_engine.decision_models.base import DecisionContext
 from triage_engine.evaluation.replay import replay
+from triage_engine.evaluation.worksheet import DISPOSITIONS, SOC_VERDICTS
 from triage_engine.fast_path.triage import triage_fast
 from triage_engine.slow_path.investigator import run_investigation
 from triage_engine.slow_path.llm import LLMClient
@@ -126,6 +129,29 @@ class ActionPolicyRequest(BaseModel):
     action: str
     verdict: Optional[Dict[str, Any]] = None
     state: Optional[Dict[str, Any]] = None
+
+
+class AdjudicationIn(BaseModel):
+    """One family adjudication from the SOC worksheet (or manual review)."""
+    family_id: str
+    family_key: Optional[List[Any]] = None
+    name: Optional[str] = None
+    soc_verdict: str                                    # SOC_VERDICTS
+    disposition: Optional[str] = None                   # DISPOSITIONS
+    alert_ids: List[str] = Field(default_factory=list)
+    applies_to_family: bool = False
+    days: List[str] = Field(default_factory=list)
+    engine_route: Optional[str] = None                  # route at adjudication time
+    adjudicator: Optional[str] = None
+    source_worksheet: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class AdjudicationBatchRequest(BaseModel):
+    adjudications: List[AdjudicationIn]
+    link_feedback: bool = Field(
+        default=True, description="also append a soc_adjudication feedback row per member alert"
+    )
 
 
 # -------------------------------------------------------------------- endpoints
@@ -245,6 +271,79 @@ async def feedback(req: FeedbackRequest) -> Dict[str, Any]:
 @app.get("/api/v1/feedback")
 async def list_feedback(alert_id: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
     return {"success": True, "data": app.state.store.list_feedback(alert_id=alert_id, limit=limit)}
+
+
+@app.post("/api/v1/adjudications")
+async def import_adjudications(req: AdjudicationBatchRequest) -> Dict[str, Any]:
+    """Batch-import SOC family adjudications (worksheet or manual review).
+
+    Each record upserts the family row and, by default, appends one
+    ``soc_adjudication`` feedback row per member alert so the existing
+    feedback read path keeps working.
+    """
+    for record in req.adjudications:
+        if record.soc_verdict not in SOC_VERDICTS:
+            raise HTTPException(status_code=422, detail={
+                "error_code": "INVALID_VERDICT", "family_id": record.family_id,
+                "value": record.soc_verdict,
+                "allowed": list(SOC_VERDICTS)})
+        if record.disposition is not None and record.disposition not in DISPOSITIONS:
+            raise HTTPException(status_code=422, detail={
+                "error_code": "INVALID_DISPOSITION", "family_id": record.family_id,
+                "value": record.disposition, "allowed": list(DISPOSITIONS)})
+    if not req.adjudications:
+        raise HTTPException(status_code=422, detail={"error_code": "EMPTY_BATCH"})
+
+    feedback_rows = 0
+    for record in req.adjudications:
+        app.state.store.save_adjudication(record.model_dump())
+        if req.link_feedback:
+            for alert_id in record.alert_ids:
+                app.state.store.save_feedback({
+                    "alert_id": alert_id,
+                    "feedback_type": "soc_adjudication",
+                    "human_verdict": record.soc_verdict,
+                    "override_reason": record.disposition,
+                    "payload": {
+                        "family_id": record.family_id,
+                        "family_key": record.family_key,
+                        "days": record.days,
+                        "engine_route": record.engine_route,
+                        "source_worksheet": record.source_worksheet,
+                        "adjudicator": record.adjudicator,
+                        "notes": record.notes,
+                    },
+                })
+                feedback_rows += 1
+    return {
+        "success": True,
+        "data": {
+            "imported": len(req.adjudications),
+            "family_ids": [r.family_id for r in req.adjudications],
+            "feedback_rows": feedback_rows,
+        },
+    }
+
+
+@app.get("/api/v1/adjudications")
+async def list_adjudications(family_id: Optional[str] = None,
+                             disposition: Optional[str] = None,
+                             limit: int = 100) -> Dict[str, Any]:
+    return {
+        "success": True,
+        "data": app.state.store.list_adjudications(
+            family_id=family_id, disposition=disposition, limit=limit),
+        "meta": {"limit": limit, "stats": app.state.store.adjudication_stats()},
+    }
+
+
+@app.get("/api/v1/adjudications/{family_id}")
+async def get_adjudication(family_id: str) -> Dict[str, Any]:
+    record = app.state.store.get_adjudication(family_id)
+    if not record:
+        raise HTTPException(status_code=404, detail={
+            "error_code": "ADJUDICATION_NOT_FOUND", "family_id": family_id})
+    return {"success": True, "data": record}
 
 
 @app.post("/api/v1/policy/evaluate")

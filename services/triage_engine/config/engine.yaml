@@ -87,6 +87,8 @@ thresholds:
     # fast path with 0 false closes across every swept combination. The
     # similar-history gate is covered by the novelty bar - NGSOC rows are
     # day-aggregated and one-shot tool FPs are normal.
+    # recalibrate.py only EMITS a suggested snippet (recalibration_<day>.json);
+    # this file is the single source of truth and is edited by humans only.
     malicious_max: 0.10
     authorized_min: 0.90
     impact_max: 1

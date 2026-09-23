@@ -65,8 +65,22 @@ CREATE TABLE IF NOT EXISTS replay_runs (
     alert_count INTEGER, metrics TEXT, results TEXT,
     created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS adjudications (
+    family_id TEXT PRIMARY KEY,
+    family_key TEXT,            -- JSON list [name, src_scopes, dst_scopes, domain]
+    name TEXT,
+    soc_verdict TEXT,           -- 有效告警 | 无效告警 | 需复查
+    disposition TEXT,           -- auto_close_ok|suppress|blocklist|monitor|relabel
+    alert_ids TEXT,             -- JSON list of member worksheet ids
+    applies_to_family INTEGER,  -- 1 = verdict covers the whole family
+    days TEXT,                  -- JSON list of export days
+    engine_route TEXT,          -- route at adjudication time (evidence)
+    adjudicator TEXT, source_worksheet TEXT, notes TEXT,
+    created_at TEXT, updated_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_decisions_alert ON decisions(alert_id);
 CREATE INDEX IF NOT EXISTS idx_cases_alert ON cases(alert_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_alert ON feedback(alert_id);
 """
 
 
@@ -81,6 +95,9 @@ class Store:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # the offline adjudication-import CLI writes the same DB file the
+        # service may hold - retry briefly instead of failing locked
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
 
@@ -154,6 +171,43 @@ class Store:
             )
         return run_id
 
+    def save_adjudication(self, record: Dict[str, Any]) -> str:
+        """Upsert a family adjudication (the SOC may revisit a family).
+
+        Returns the family_id (the primary key - stable across re-imports).
+        """
+        family_id = record["family_id"]
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO adjudications VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(family_id) DO UPDATE SET
+                    family_key=excluded.family_key, name=excluded.name,
+                    soc_verdict=excluded.soc_verdict, disposition=excluded.disposition,
+                    alert_ids=excluded.alert_ids, applies_to_family=excluded.applies_to_family,
+                    days=excluded.days, engine_route=excluded.engine_route,
+                    adjudicator=excluded.adjudicator,
+                    source_worksheet=excluded.source_worksheet, notes=excluded.notes,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    family_id,
+                    json.dumps(record.get("family_key", []), ensure_ascii=False),
+                    record.get("name"),
+                    record.get("soc_verdict"),
+                    record.get("disposition"),
+                    json.dumps(record.get("alert_ids", [])),
+                    1 if record.get("applies_to_family") else 0,
+                    json.dumps(record.get("days", [])),
+                    record.get("engine_route"),
+                    record.get("adjudicator"),
+                    record.get("source_worksheet"),
+                    record.get("notes"),
+                    self._now(), self._now(),
+                ),
+            )
+        return family_id
+
     # ------------------------------------------------------------------- read
     def get_decision(self, decision_id: str) -> Optional[Dict[str, Any]]:
         row = self._conn.execute("SELECT * FROM decisions WHERE decision_id=?", (decision_id,)).fetchone()
@@ -193,6 +247,52 @@ class Store:
         d = dict(row)
         d["metrics"] = json.loads(d.get("metrics") or "{}")
         d["results"] = json.loads(d.get("results") or "[]")
+        return d
+
+    def list_adjudications(self, family_id: Optional[str] = None,
+                           disposition: Optional[str] = None,
+                           limit: int = 100) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM adjudications"
+        conditions: List[str] = []
+        params: List[Any] = []
+        if family_id:
+            conditions.append("family_id=?")
+            params.append(family_id)
+        if disposition:
+            conditions.append("disposition=?")
+            params.append(disposition)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(query, params).fetchall()
+        return [self._unjson_adjudication(dict(r)) for r in rows]
+
+    def get_adjudication(self, family_id: str) -> Optional[Dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT * FROM adjudications WHERE family_id=?", (family_id,)
+        ).fetchone()
+        return self._unjson_adjudication(dict(row)) if row else None
+
+    def adjudication_stats(self) -> Dict[str, Any]:
+        rows = self._conn.execute("SELECT * FROM adjudications").fetchall()
+        by_verdict: Dict[str, int] = {}
+        by_disposition: Dict[str, int] = {}
+        member_alerts = 0
+        for r in rows:
+            by_verdict[r["soc_verdict"]] = by_verdict.get(r["soc_verdict"], 0) + 1
+            by_disposition[r["disposition"]] = by_disposition.get(r["disposition"], 0) + 1
+            member_alerts += len(json.loads(r["alert_ids"] or "[]"))
+        return {"total": len(rows), "by_verdict": by_verdict,
+                "by_disposition": by_disposition, "member_alerts": member_alerts}
+
+    @staticmethod
+    def _unjson_adjudication(d: Dict[str, Any]) -> Dict[str, Any]:
+        for key in ("family_key", "alert_ids", "days"):
+            if key in d and isinstance(d[key], str):
+                d[key] = json.loads(d[key])
+        if "applies_to_family" in d:
+            d["applies_to_family"] = bool(d["applies_to_family"])
         return d
 
     def close(self) -> None:
