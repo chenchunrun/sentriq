@@ -187,11 +187,8 @@ def gold_for(alert, rng):
                     novelty=sd(1), business_impact=sd(1),
                     containment_state="UNKNOWN", investigation_need=j(0.35, 0.1),
                     route="DEEP_INVESTIGATE")
-    if tri == "需人工研判":
-        return dict(malicious=j(0.5, 0.1), authorized=j(0.4, 0.1), evidence_strength=sd(2),
-                    novelty=sd(2), business_impact=sd(impact),
-                    containment_state="UNKNOWN", investigation_need=j(0.85),
-                    route="HUMAN_REVIEW")
+    if tri in _EXCLUDED_CLASSES:
+        return None
     return None
 
 
@@ -311,11 +308,15 @@ def to_raw_alert(alert, alert_id):
 
 
 # balanced sample sizes per triage class (train) - full-data round: ~3x
+# NOTE: 需人工研判 is EXCLUDED from training and eval - it is the SOC's own
+# conservative placeholder (in practice these alerts are abnormal), so its
+# 0.5-ish gold would only drag the model toward indecision.
+_EXCLUDED_CLASSES = {"需人工研判"}
 _TRAIN_QUOTA = {
     "有效告警:攻击成功": 480, "有效告警:攻击失败": 420, "有效告警:结果未知": 360,
     "隐患:异常行为": 330, "隐患:脆弱性": 120,
     "无效告警:业务触发": 180, "无效告警:数据缺失": 120, "无效告警:其他": 75,
-    "无效告警:规则误报": 24, "需人工研判": 180,
+    "无效告警:规则误报": 24,
 }
 
 
