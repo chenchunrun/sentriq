@@ -52,6 +52,8 @@ def evaluate_hard_gates(state: Dict[str, Any]) -> HardGateResult:
         "data_exfiltration",
         "ransomware",
         "evidence_conflict",
+        "attack_success",
+        "external_to_internal",
     ):
         if bool(features.get(gate)):
             hits.append(gate)

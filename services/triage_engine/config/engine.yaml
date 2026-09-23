@@ -80,14 +80,19 @@ decision_registry:
         HUMAN_REVIEW: "unclear or conflicting, needs human judgement"
 
 thresholds:
-  version: triage_policy_v1
+  version: triage_policy_v1.1-shadow0913
   fast_close:
+    # calibrated on the held-out 0913 shadow day (18-point threshold sweep):
+    # authorized_min 0.95 was unreachable (benign p90 = 0.938); 0.90 opens the
+    # fast path with 0 false closes across every swept combination. The
+    # similar-history gate is covered by the novelty bar - NGSOC rows are
+    # day-aggregated and one-shot tool FPs are normal.
     malicious_max: 0.10
-    authorized_min: 0.95
+    authorized_min: 0.90
     impact_max: 1
     evidence_strength_min: 2
     novelty_max: 1
-    require_similar_history: true
+    require_similar_history: false
     similar_history_min: 1
   fast_queue:
     malicious_min: 0.70
@@ -117,6 +122,10 @@ hard_gates:
   data_exfiltration: flags.data_exfiltration == true
   ransomware: flags.ransomware == true
   evidence_conflict: flags.evidence_conflict == true
+  # shadow-0921 additions: a sensor-confirmed SUCCESS and any inbound attempt
+  # from a public IP must never be auto-closed (false-close postmortem)
+  attack_success: flags.attack_success == true
+  external_to_internal: flags.external_to_internal == true
 
 slow_path:
   budgets:

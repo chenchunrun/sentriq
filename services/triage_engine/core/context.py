@@ -38,6 +38,25 @@ _KEYWORD_FLAGS: list = [
 ]
 
 
+def _is_public_ip(value) -> bool:
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(str(value))
+        return not addr.is_private
+    except ValueError:
+        return False
+
+
+def _is_private_ip(value) -> bool:
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(str(value)).is_private
+    except ValueError:
+        return False
+
+
 def _repo_data_dir() -> Path:
     """Repository data/ directory (src layout: services/triage_engine/core -> repo/data)."""
     return Path(__file__).resolve().parents[3] / "data"
@@ -124,6 +143,8 @@ class DetectionFlags(BaseModel):
     data_exfiltration: bool = False
     ransomware: bool = False
     evidence_conflict: bool = False
+    attack_success: bool = False          # sensor reports the attack SUCCEEDED
+    external_to_internal: bool = False    # inbound attempt from a public IP
 
 
 class AlertContext(BaseModel):
@@ -165,6 +186,14 @@ class AlertContext(BaseModel):
             flags.multiple_hosts = True
         flags.active_attack = bool(raw.get("active_attack", False)) or (
             flags.ransomware or flags.data_exfiltration
+        )
+        flags.attack_success = str(raw.get("attack_result", "")).strip() in ("成功", "success", "SUCCESS")
+        # inbound ATTEMPTS from public IPs are never auto-closable; a delivered-
+        # and-contained sample (no attempt semantics) still qualifies for FAST_QUEUE
+        flags.external_to_internal = (
+            str(raw.get("attack_result", "")).strip() in ("企图", "attempt", "ATTEMPT")
+            and _is_public_ip(raw.get("source_ip"))
+            and _is_private_ip(raw.get("target_ip") or raw.get("destination_ip"))
         )
 
         ctx = cls(alert=alert, flags=flags)

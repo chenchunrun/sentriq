@@ -287,8 +287,12 @@ def render_state(alert, alert_id, hunter=None):
     return "\n".join(lines)
 
 
-def to_raw_alert(alert, alert_id):
-    """Shape for the engine's replay path (AlertContext.build compatible)."""
+def to_raw_alert(alert, alert_id, hunter=None):
+    """Shape for the engine's replay path (AlertContext.build compatible).
+
+    Carries `state_text_override` - the exact NGSOC-rendered state the model
+    was fine-tuned on - so replay/triage uses the same state text as training
+    (no training/serving skew)."""
     first = lambda v: (v[0] if isinstance(v, list) and v else (v if not isinstance(v, list) else None))  # noqa: E731
     category = str(alert.get("ruleCategoryName") or "unknown")
     flags = _FLAGS_BY_CATEGORY.get(category, {})
@@ -302,8 +306,10 @@ def to_raw_alert(alert, alert_id):
         "source_ip": first(alert.get("srcIp")),
         "target_ip": first(alert.get("dstIp")),
         "domain": first(alert.get("domain")) or None,
+        "attack_result": str(alert.get("attackResult") or ""),
         "flags": flags,
         "similar_alerts_30d": (int(alert.get("occurDays") or 1)) - 1,
+        "state_text_override": render_state(alert, alert_id, hunter=hunter),
     }
 
 
@@ -321,10 +327,16 @@ _TRAIN_QUOTA = {
 
 
 def sample_days(ngsoc_dir, days, quota, rng):
+    """Memory-bounded sampling: reservoir per class capped at the quota, so a
+    90k-row day never accumulates beyond quota x classes in RAM."""
+    import gc
+
     sys.path.insert(0, str(ngsoc_dir))
     from ngsoc_hunter.etl import load_alerts
 
-    pool = {}
+    reservoir = {tri: [] for tri in quota}   # each: list capped at quota[tri]
+    seen_per_class = {tri: 0 for tri in quota}
+
     for day in days:
         try:
             alerts = load_alerts(ngsoc_dir, date_filter=day)
@@ -332,12 +344,23 @@ def sample_days(ngsoc_dir, days, quota, rng):
             continue
         for a in alerts:
             tri = str(a.get("triageResult") or "").strip()
-            if tri in quota:
-                pool.setdefault(tri, []).append((day, a))
-    sampled = []
-    for tri, items in pool.items():
-        rng.shuffle(items)
-        sampled.extend(items[: quota[tri]])
+            if tri not in quota:
+                continue
+            slot = reservoir[tri]
+            n = seen_per_class[tri]
+            if len(slot) < quota[tri]:
+                slot.append((day, a))
+            else:
+                # reservoir replace -> fair across days without hoarding
+                idx = rng.randrange(n + 1)
+                if idx < quota[tri]:
+                    slot[idx] = (day, a)
+            seen_per_class[tri] = n + 1
+        del alerts
+        gc.collect()
+
+    sampled = [item for slot in reservoir.values() for item in slot]
+    rng.shuffle(sampled)
     return sampled
 
 
@@ -370,7 +393,7 @@ def build_cases(sampled, questions, rng, prefix, hunter=None):
             "questions": json.dumps(questions, ensure_ascii=False),
             "gold": json.dumps({qid: _gold_probabilities(spec, gold[qid])
                                 for qid, spec in questions.items()}, ensure_ascii=False),
-            "_raw_alert": to_raw_alert(alert, alert_id),
+            "_raw_alert": to_raw_alert(alert, alert_id, hunter=hunter),
         })
     return cases
 

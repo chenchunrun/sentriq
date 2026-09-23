@@ -19,6 +19,7 @@ import pytest
 from triage_engine.core import gate as gate_mod
 from triage_engine.core import router as router_mod
 from triage_engine.core.compressor import compress
+from triage_engine.core.registry import registry
 from triage_engine.core.context import AlertContext
 from triage_engine.decision_models.base import DecisionResult
 
@@ -107,16 +108,39 @@ def test_degraded_provider_goes_to_human(critical_credential_alert):
     assert "PROVIDER_DEGRADED" in result.reason_codes
 
 
-def test_fast_close_requires_history():
-    """§11.1: no similar history -> not FAST_CLOSE even with clean scores."""
+def test_fast_close_history_gate_configurable():
+    """Calibrated policy (triage_policy_v1.1): history gate off by default; when
+    an operator re-enables it, no-history alerts must not FAST_CLOSE."""
     alert = {
         "alert_id": "ALT-NOHIST", "alert_type": "scan", "severity": "info",
         "description": "scanner", "asset_id": "WS-050", "similar_alerts_30d": 0,
         "active_change": True,
     }
     state = _state(alert)
-    result = router_mod.route(_decision(), gate_mod.evaluate_hard_gates(state), state)
+    gates = gate_mod.evaluate_hard_gates(state)
+    strict = {"fast_close": {**registry.thresholds("fast_close"), "require_similar_history": True}}
+    result = router_mod.route(_decision(), gates, state, thresholds=strict)
     assert result.route != "FAST_CLOSE"
+
+
+def test_fast_close_blocked_by_attempt_or_success_gates():
+    """shadow-0921 postmortem: inbound attempts and confirmed successes never close."""
+    attempt = {
+        "alert_id": "ALT-INBOUND", "alert_type": "anomaly", "severity": "medium",
+        "description": "TFTP probe", "source_ip": "205.210.31.96", "target_ip": "10.0.1.5",
+        "attack_result": "企图", "asset_id": "WS-050",
+    }
+    gates = gate_mod.evaluate_hard_gates(_state(attempt))
+    assert "external_to_internal" in gates.gates_hit
+    assert gates.fast_close_allowed is False
+
+    success = {
+        "alert_id": "ALT-SUCCESS", "alert_type": "anomaly", "severity": "medium",
+        "description": "command exec", "source_ip": "10.0.1.5", "target_ip": "10.0.1.6",
+        "attack_result": "成功", "asset_id": "WS-050",
+    }
+    gates2 = gate_mod.evaluate_hard_gates(_state(success))
+    assert "attack_success" in gates2.gates_hit
 
 
 def test_reason_codes_present_for_escalation():

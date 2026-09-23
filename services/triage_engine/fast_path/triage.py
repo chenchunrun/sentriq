@@ -45,9 +45,14 @@ async def triage_fast(
     state: CompressedState = compress(context, raw_alert)
     state_dict = state.model_dump()
 
+    # Training/serving skew guard: alerts ingested from external formats
+    # (e.g. NGSOC) may carry the exact state text the decision model was
+    # fine-tuned on - prefer it over the generic compressor rendering.
+    state_text_override = raw_alert.get("state_text_override")
+
     decision_ctx = DecisionContext(
         alert_id=state.alert_id,
-        state_text=state.to_text(),
+        state_text=state_text_override or state.to_text(),
         question_version=registry.question_version,
     )
     decision = await decide_with_fallback(state_dict, registry.questions, decision_ctx, provider)
